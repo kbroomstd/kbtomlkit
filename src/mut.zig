@@ -25,7 +25,7 @@
 const std = @import("std");
 const doc_mod = @import("document.zig");
 const parser_mod = @import("parser.zig");
-const kbdiag = @import("kbwinnow").kbdiagnostic;
+const kbdiagnostic = @import("kbdiagnostic");
 const Allocator = std.mem.Allocator;
 
 // --- Re-exports -------------------------------------------------------------
@@ -56,12 +56,12 @@ pub const indexOfUnescapedDot = doc_mod.indexOfUnescapedDot;
 /// Re-export the `kbdiagnostic` vtable so callers don't need a second
 /// import. `mut.Diagnostic` is the parameter type for every mutation
 /// method; populate it via `MutationDiagnostic` (below).
-pub const Diagnostic = kbdiag.Diagnostic;
-pub const Severity = kbdiag.Severity;
-pub const LabeledSpan = kbdiag.LabeledSpan;
-pub const SourceSpan = kbdiag.SourceSpan;
-pub const SourceCode = kbdiag.SourceCode;
-pub const NamedSource = kbdiag.NamedSource;
+pub const Diagnostic = kbdiagnostic.Diagnostic;
+pub const Severity = kbdiagnostic.Severity;
+pub const LabeledSpan = kbdiagnostic.LabeledSpan;
+pub const SourceSpan = kbdiagnostic.SourceSpan;
+pub const SourceCode = kbdiagnostic.SourceCode;
+pub const NamedSource = kbdiagnostic.NamedSource;
 
 /// Path separator between segments in stored `Document.entries[i].path`.
 /// Mirrors the parser's actual encoding.
@@ -110,13 +110,13 @@ pub const MutationDiagnostic = struct {
     message_text: []const u8,
     code_str: []const u8,
     help_text: ?[]const u8,
-    source: ?*const kbdiag.SourceCode,
-    span: kbdiag.SourceSpan,
-    labels_buf: [1]kbdiag.LabeledSpan,
+    source: ?*const kbdiagnostic.SourceCode,
+    span: kbdiagnostic.SourceSpan,
+    labels_buf: [1]kbdiagnostic.LabeledSpan,
 
     /// Construct a `kbdiag.Diagnostic` vtable view of `self`.
-    pub fn diagnostic(self: *const Self) kbdiag.Diagnostic {
-        return kbdiag.Diagnostic.implBy(self);
+    pub fn diagnostic(self: *const Self) kbdiagnostic.Diagnostic {
+        return kbdiagnostic.Diagnostic.implBy(self);
     }
 
     // --- vtable methods (consumed by `kbdiag.Diagnostic.implBy`) ---
@@ -125,7 +125,7 @@ pub const MutationDiagnostic = struct {
         return self.code_str;
     }
 
-    pub fn severity(_: *const Self) ?kbdiag.Severity {
+    pub fn severity(_: *const Self) ?kbdiagnostic.Severity {
         return .Error;
     }
 
@@ -137,11 +137,11 @@ pub const MutationDiagnostic = struct {
         return self.message_text;
     }
 
-    pub fn sourceCode(self: *const Self) ?*const kbdiag.SourceCode {
+    pub fn sourceCode(self: *const Self) ?*const kbdiagnostic.SourceCode {
         return self.source;
     }
 
-    pub fn labels(self: *const Self) ?[]const kbdiag.LabeledSpan {
+    pub fn labels(self: *const Self) ?[]const kbdiagnostic.LabeledSpan {
         return self.labels_buf[0..];
     }
 };
@@ -152,8 +152,8 @@ pub const MutationDiagnostic = struct {
 /// caller fills `span`; this helper wires the static fields and
 /// derives the label span from it.
 pub fn keyAlreadyPresent(
-    source: ?*const kbdiag.SourceCode,
-    span: kbdiag.SourceSpan,
+    source: ?*const kbdiagnostic.SourceCode,
+    span: kbdiagnostic.SourceSpan,
 ) MutationDiagnostic {
     return .{
         .kind = .key_already_present,
@@ -162,14 +162,14 @@ pub fn keyAlreadyPresent(
         .help_text = "use set() to replace, or remove() first",
         .source = source,
         .span = span,
-        .labels_buf = .{kbdiag.LabeledSpan.newPrimary("this key", span.offset, span.length)},
+        .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary("this key", span.offset, span.length)},
     };
 }
 
 /// Build a `MutationDiagnostic` for `Error.NonExistentKey`.
 pub fn nonExistentKey(
-    source: ?*const kbdiag.SourceCode,
-    span: kbdiag.SourceSpan,
+    source: ?*const kbdiagnostic.SourceCode,
+    span: kbdiagnostic.SourceSpan,
 ) MutationDiagnostic {
     return .{
         .kind = .non_existent_key,
@@ -178,15 +178,15 @@ pub fn nonExistentKey(
         .help_text = "use contains() to test before remove()",
         .source = source,
         .span = span,
-        .labels_buf = .{kbdiag.LabeledSpan.newPrimary("this key", span.offset, span.length)},
+        .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary("this key", span.offset, span.length)},
     };
 }
 
 /// Build a `MutationDiagnostic` for `Error.KeyTypeError`. The
 /// `expected` and `actual` slices are concatenated into the help text.
 pub fn keyTypeError(
-    source: ?*const kbdiag.SourceCode,
-    span: kbdiag.SourceSpan,
+    source: ?*const kbdiagnostic.SourceCode,
+    span: kbdiagnostic.SourceSpan,
     expected: []const u8,
     actual: []const u8,
 ) MutationDiagnostic {
@@ -203,14 +203,14 @@ pub fn keyTypeError(
         .help_text = help_text,
         .source = source,
         .span = span,
-        .labels_buf = .{kbdiag.LabeledSpan.newPrimary("this key", span.offset, span.length)},
+        .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary("this key", span.offset, span.length)},
     };
 }
 
 /// Build a `MutationDiagnostic` for `Error.TypeMismatch`.
 pub fn typeMismatch(
-    source: ?*const kbdiag.SourceCode,
-    span: kbdiag.SourceSpan,
+    source: ?*const kbdiagnostic.SourceCode,
+    span: kbdiagnostic.SourceSpan,
     expected_kind: []const u8,
 ) MutationDiagnostic {
     var help_buf: [128]u8 = undefined;
@@ -226,7 +226,7 @@ pub fn typeMismatch(
         .help_text = help_text,
         .source = source,
         .span = span,
-        .labels_buf = .{kbdiag.LabeledSpan.newPrimary("this item", span.offset, span.length)},
+        .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary("this item", span.offset, span.length)},
     };
 }
 
@@ -240,7 +240,7 @@ pub fn invalidPath(message: []const u8) MutationDiagnostic {
         .help_text = "the path produced an empty key after escape",
         .source = null,
         .span = .{ .offset = 0, .length = 0 },
-        .labels_buf = .{kbdiag.LabeledSpan.newPrimary("this path", 0, 0)},
+        .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary("this path", 0, 0)},
     };
 }
 
@@ -468,7 +468,7 @@ test "mutationDiagnosticRoundTrip" {
     const diag = d.diagnostic();
     try std.testing.expectEqualStrings("kbtomlkit::key_already_present", diag.code().?);
     try std.testing.expectEqualStrings("key already present in this table", diag.message());
-    try std.testing.expectEqual(kbdiag.Severity.Error, diag.severity().?);
+    try std.testing.expectEqual(kbdiagnostic.Severity.Error, diag.severity().?);
     try std.testing.expectEqualStrings("this key", diag.labels().?[0].label().?);
 }
 

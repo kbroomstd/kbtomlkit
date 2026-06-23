@@ -1,4 +1,8 @@
-# References
+# Directives
+
++ For any file search or grep in the current git-indexed directory, use fff tools.
+
+## References
 See the following folders for the reference of what we use first instead of searching the web
 
 Mostly at `../references/<hosting>/<user>/<repo>`

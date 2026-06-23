@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const doc_mod = @import("document.zig");
-const kbdiag = @import("kbwinnow").kbdiagnostic;
+const kbdiagnostic = @import("kbdiagnostic");
 const mut = @import("mut.zig");
 
 pub const Error = mut.Error;
@@ -283,7 +283,7 @@ fn regenRawInPlace(gpa: Allocator, scalar: *doc_mod.Scalar) void {
     }
 }
 
-fn oomDiagnostic(span: kbdiag.SourceSpan) kbdiag.Diagnostic {
+fn oomDiagnostic(span: kbdiagnostic.SourceSpan) kbdiagnostic.Diagnostic {
     var d: mut.MutationDiagnostic = .{
         .kind = .out_of_memory,
         .message_text = "out of memory growing array",
@@ -291,7 +291,7 @@ fn oomDiagnostic(span: kbdiag.SourceSpan) kbdiag.Diagnostic {
         .help_text = null,
         .source = null,
         .span = span,
-        .labels_buf = .{kbdiag.LabeledSpan.newPrimary(null, span.offset, span.length)},
+        .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary(null, span.offset, span.length)},
     };
     return d.diagnostic();
 }

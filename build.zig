@@ -5,17 +5,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // [[ dependencies
-    const kbwinnow_dep = b.dependency("kbwinnow", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const kbwinnow_mod = kbwinnow_dep.module("kbwinnow");
-
     const kbdiagnostic_dep = b.dependency("kbdiagnostic", .{
         .target = target,
         .optimize = optimize,
     });
     const kbdiagnostc_mod = kbdiagnostic_dep.module("kbdiagnostic");
+
+    const kbwinnow_dep = b.dependency("kbwinnow", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const kbwinnow_mod = kbwinnow_dep.module("kbwinnow");
+    kbwinnow_mod.addImport("kbdiagnostic", kbdiagnostc_mod);
+
     // end dependencies ]]
 
     const mod = b.addModule("kbtomlkit", .{

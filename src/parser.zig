@@ -14,7 +14,7 @@ const std = @import("std");
 const kbwinnow = @import("kbwinnow");
 const doc = @import("document.zig");
 const diagmod = @import("diagnostics.zig");
-const kbdiag = kbwinnow.kbdiagnostic;
+const kbdiagnostic = @import("kbdiagnostic");
 
 const Str = kbwinnow.Str;
 const Stream = kbwinnow.stream_interface.Stream;
@@ -91,7 +91,7 @@ fn normalizeCrlf(alloc: std.mem.Allocator, input: []const u8) ParseError![]const
 const DocBuilder = struct {
     alloc: std.mem.Allocator,
     entries: std.ArrayList(doc.Entry),
-    source: kbdiag.NamedSource,
+    source: kbdiagnostic.NamedSource,
     table_path: []const u8 = "",
     table_is_array: bool = false,
     active_array_path: []const u8 = "",

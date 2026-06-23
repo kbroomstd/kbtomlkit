@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const doc_mod = @import("document.zig");
-const kbdiag = @import("kbwinnow").kbdiagnostic;
+const kbdiagnostic = @import("kbdiagnostic");
 const mut = @import("mut.zig");
 const mut_table = @import("mut_table.zig");
 
@@ -172,7 +172,7 @@ fn failOom(diag: ?*mut.Diagnostic) Error {
             .help_text = null,
             .source = null,
             .span = .{ .offset = 0, .length = 0 },
-            .labels_buf = .{kbdiag.LabeledSpan.newPrimary(null, 0, 0)},
+            .labels_buf = .{kbdiagnostic.LabeledSpan.newPrimary(null, 0, 0)},
         };
         d.* = md.diagnostic();
     }
