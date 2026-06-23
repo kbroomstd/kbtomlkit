@@ -1,0 +1,25 @@
+.{
+    .name = .kbtomlkit,
+    .version = "0.0.1",
+    .fingerprint = 0xfcf35febca3b32bd, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .ohsnap = .{
+            .url = "https://github.com/mnemnion/ohsnap/archive/refs/tags/v0.5.1.tar.gz",
+            .hash = "ohsnap-0.5.1-iWxzyj2qAADjYk9IZ2awVmEM9vhRHvz114xTRkKQVM_S",
+        },
+        .kbdiagnostic = .{
+            .url = "https://github.com/kbroomstd/kbdiagnostic/archive/refs/tags/0.0.1.tar.gz",
+            .hash = "kbdiagnostic-0.0.0-t-kifrwAAQCtDL-EuxAxR4dwB9Z685DB85mD-YBkq7Io",
+        },
+        .kbwinnow = .{
+            .url = "https://github.com/kbroomstd/kbwinnow/archive/refs/tags/v0.0.1.tar.gz",
+            .hash = "kbwinnow-0.0.0-23w4_PlPAQAr2KA0gtL1qa8jptvmS_-AFGvp1JrZa7n7",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

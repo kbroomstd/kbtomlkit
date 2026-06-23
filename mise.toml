@@ -1,0 +1,29 @@
+[settings]
+lockfile = true
+
+[tools]
+"github:toml-lang/toml-test" = "latest"
+
+[tasks.build]
+description = "Build the release artifact with ReleaseSmall"
+run = "zig build -Doptimize=ReleaseSmall"
+
+[tasks.clean]
+description = "Remove build artifacts and zig cache"
+run = "rm -rf zig-out .zig-cache"
+
+[tasks.test]
+description = "Run the test suite"
+run = "zig build test"
+
+[tasks.format]
+description = "Format zig sources"
+run = "zig fmt src/ ./build.zig ./build.zig.zon"
+
+[tasks.tomltest]
+description = "Run the toml-test conformance suite against the decoder"
+run = '''
+zig build tomltest-decoder
+toml-test test -toml=1.1.0 -decoder=zig-out/bin/kbtomlkit-tomltest-decoder
+'''
+
