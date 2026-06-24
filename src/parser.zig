@@ -301,9 +301,12 @@ const MlBasicStringP = struct {
         while (true) {
             const b = s.nextByte() orelse return cutUnterm(ctx, start);
             if (b == '"') {
+                // Count consecutive " characters (including the one just consumed)
                 var q: usize = 1;
                 while (s.peekByte(@intCast(q - 1)) == @as(?u8, '"')) q += 1;
                 if (q >= 3) {
+                    // If q >= 6, content has 3+ consecutive unescaped " → invalid
+                    if (q >= 6) return cutUnterm(ctx, start);
                     s.setCursor(s.cursor() + (q - 1));
                     return s.data()[start..s.cursor()];
                 }
@@ -347,9 +350,12 @@ const MlLiteralStringP = struct {
         while (true) {
             const b = s.nextByte() orelse return cutUnterm(ctx, start);
             if (b == '\'') {
+                // Count consecutive ' characters (including the one just consumed)
                 var q: usize = 1;
                 while (s.peekByte(@intCast(q - 1)) == @as(?u8, '\'')) q += 1;
                 if (q >= 3) {
+                    // If q >= 6, content has 3+ consecutive unescaped ' → invalid
+                    if (q >= 6) return cutUnterm(ctx, start);
                     s.setCursor(s.cursor() + (q - 1));
                     return s.data()[start..s.cursor()];
                 }
@@ -780,14 +786,47 @@ fn parseKeyValue(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
         const ls = s.cursor();
         var le = ls;
         while (le < s.data().len and s.data()[le] != '\n') : (le += 1) {}
+        var line = s.data()[ls..le];
+        // Strip trailing comment from subsequent lines (TOML allows comments after values)
+        // But NOT inside multiline strings — # is valid content there
+        const is_ml = value_buf.items.len >= 3 and
+            ((value_buf.items[0] == '"' and value_buf.items[1] == '"' and value_buf.items[2] == '"') or
+             (value_buf.items[0] == '\'' and value_buf.items[1] == '\'' and value_buf.items[2] == '\''));
+        if (!is_ml) {
+            if (findCommentStart(line)) |ci| {
+                // Trim trailing whitespace after stripping comment
+                var end = ci;
+                while (end > 0 and (line[end - 1] == ' ' or line[end - 1] == '\t')) : (end -= 1) {}
+                line = line[0..end];
+            }
+        }
         try value_buf.append(alloc, '\n');
-        try value_buf.appendSlice(alloc, s.data()[ls..le]);
+        try value_buf.appendSlice(alloc, line);
         s.setCursor(le);
         first_end = le;
     }
     // Advance cursor to end of line, then consume newline
     s.setCursor(first_end);
     consumeNewline(s);
+
+    // For multiline strings, strip trailing comment after the closing delimiter
+    if (value_buf.items.len >= 6) {
+        const raw = value_buf.items;
+        const q = raw[0]; // '"' or '\''
+        if (raw[0] == q and raw[1] == q and raw[2] == q) {
+            // Find closing """ or ''' from the end, skipping trailing comment
+            var k: usize = raw.len;
+            // Skip trailing non-quote characters (comment)
+            while (k > 3 and raw[k - 1] != q) : (k -= 1) {}
+            // Count trailing quotes
+            var tq: usize = 0;
+            while (k > 3 and raw[k - 1] == q) : (k -= 1) tq += 1;
+            if (tq >= 3) {
+                // Strip everything after the closing delimiter
+                value_buf.items.len = k + tq;
+            }
+        }
+    }
 
     // Parse the value using combinator-based parser
     const value_text = value_buf.items;
@@ -872,9 +911,8 @@ fn parseValueCombinator(alloc: std.mem.Allocator, offset: usize, raw: []const u8
         defer vctx.deinit();
         const result = string_parser.parseNext(vctx.asContext());
         if (result == error.Backtrack or result == error.Cut) return error.InvalidToml;
-        // Reject if extra content follows a single-line string
-        const is_multiline = raw.len >= 3 and ((raw[0] == '"' and raw[1] == '"' and raw[2] == '"') or (raw[0] == '\'' and raw[1] == '\'' and raw[2] == '\''));
-        if (!is_multiline and ds.remaining().len > 0) return error.InvalidToml;
+        // Reject if extra content follows the string (covers both single-line and multiline)
+        if (ds.remaining().len > 0) return error.InvalidToml;
     }
 
     // Store raw canonical form. Strings keep their quotes so
@@ -910,6 +948,11 @@ fn parseArrayChildren(alloc: std.mem.Allocator, offset: usize, raw: []const u8) 
     while (pos < inner.len) {
         while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         if (pos >= inner.len) break;
+        // Skip # comments inside arrays (TOML 1.1 allows this)
+        if (inner[pos] == '#') {
+            while (pos < inner.len and inner[pos] != '\n') : (pos += 1) {}
+            continue;
+        }
         const start = pos;
         const end = findValueEnd(inner, pos);
         if (end == pos) return error.InvalidToml;
@@ -921,6 +964,41 @@ fn parseArrayChildren(alloc: std.mem.Allocator, offset: usize, raw: []const u8) 
     }
     return list.toOwnedSlice(alloc);
 }
+
+/// Build a nested scalar tree for dotted keys in inline tables.
+/// For key "a.b.c" with value 1, produces: {key:"a", children:[{key:"b", children:[{key:"c", value:1}]}]}
+fn buildNestedInlineScalar(alloc: std.mem.Allocator, full_key: []const u8, val: doc.Scalar) anyerror!doc.Scalar {
+    // Find first unescaped dot
+    var dot_pos: ?usize = null;
+    var i: usize = 0;
+    while (i < full_key.len) {
+        if (full_key[i] == '\\' and i + 1 < full_key.len) { i += 2; continue; }
+        if (full_key[i] == '.') { dot_pos = i; break; }
+        i += 1;
+    }
+    if (dot_pos == null) {
+        // Leaf level: no more dots
+        var result = val;
+        result.key = try materializeKey(alloc, full_key);
+        return result;
+    }
+    const dp = dot_pos.?;
+    const first_part = full_key[0..dp];
+    const rest = full_key[dp + 1 ..];
+    // Recurse on the rest to build the nested child
+    const child = try buildNestedInlineScalar(alloc, rest, val);
+    // Create intermediate parent scalar
+    var parent = doc.Scalar{
+        .kind = .inline_table,
+        .raw = "",
+        .span = val.span,
+    };
+    parent.key = try materializeKey(alloc, first_part);
+    parent.children = try alloc.alloc(doc.Scalar, 1);
+    parent.children[0] = child;
+    return parent;
+}
+
 
 fn parseInlineTableChildren(alloc: std.mem.Allocator, offset: usize, raw: []const u8) anyerror![]doc.Scalar {
     const inner = raw[1 .. raw.len - 1];
@@ -945,9 +1023,27 @@ fn parseInlineTableChildren(alloc: std.mem.Allocator, offset: usize, raw: []cons
         }
         seen_keys.deinit();
     }
+    // Collect flat (key_path, value) pairs first
+    var flat_keys: std.ArrayList([]const u8) = .empty;
+    var flat_vals: std.ArrayList(doc.Scalar) = .empty;
+    errdefer {
+        for (flat_keys.items) |k| alloc.free(k);
+        flat_keys.deinit(alloc);
+        for (flat_vals.items) |*v| {
+            alloc.free(v.raw);
+            if (v.key) |k| alloc.free(k);
+            for (v.children) |*child| doc.Document.deinitScalar(alloc, child);
+            if (v.children.len > 0) alloc.free(v.children);
+        }
+        flat_vals.deinit(alloc);
+    }
     while (pos < inner.len) {
         while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         if (pos >= inner.len) break;
+        if (inner[pos] == '#') {
+            while (pos < inner.len and inner[pos] != '\n') : (pos += 1) {}
+            continue;
+        }
         const key_start = pos;
         const key_end = findInlineKeyEnd(inner, pos);
         if (key_end == pos) return error.InvalidToml;
@@ -961,21 +1057,64 @@ fn parseInlineTableChildren(alloc: std.mem.Allocator, offset: usize, raw: []cons
         const val_end = findValueEnd(inner, pos);
         if (val_end == pos) return error.InvalidToml;
         const val_text = std.mem.trim(u8, inner[val_start..val_end], " \t");
-        var val = try parseValueCombinator(alloc, offset + 1 + val_start, val_text);
+        const val = try parseValueCombinator(alloc, offset + 1 + val_start, val_text);
         const key = try parseDottedKeyFromSlice(alloc, key_text);
-        var kit = seen_keys.iterator();
-        while (kit.next()) |entry| {
+        // Inside inline tables, check for exact matches AND prefix conflicts
+        // e.g. b = 1 and b.c = 2 is invalid (b is already a value)
+        var kit2 = seen_keys.iterator();
+        while (kit2.next()) |entry| {
             if (pathSegmentsConflict(key, entry.key_ptr.*)) return error.InvalidToml;
         }
         try seen_keys.put(key, {});
-        const split = splitKeyPath(key);
-        val.key = try materializeKey(alloc, split.leaf);
-        try list.append(alloc, val);
+        try flat_keys.append(alloc, key);
+        try flat_vals.append(alloc, val);
         pos = val_end;
         while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         if (pos < inner.len and inner[pos] == ',') pos += 1;
     }
+    // Build nested scalar tree from flat entries
+    for (flat_keys.items, flat_vals.items) |fk, fv| {
+        try insertDottedInlineKey(alloc, &list, fk, fv);
+    }
+    // Clean up flat arrays (values moved into list)
+    flat_keys.deinit(alloc);
+    flat_vals.deinit(alloc);
     return list.toOwnedSlice(alloc);
+}
+
+/// Insert a dotted key-value pair into a list of scalars, merging with existing
+/// entries that share the same first component.
+fn insertDottedInlineKey(alloc: std.mem.Allocator, list: *std.ArrayList(doc.Scalar), full_key: []const u8, val: doc.Scalar) anyerror!void {
+    const split = splitKeyPath(full_key);
+    if (split.parent.len == 0) {
+        var v = val;
+        v.key = try materializeKey(alloc, split.leaf);
+        try list.append(alloc, v);
+        return;
+    }
+    const first_dot = doc.indexOfUnescapedDot(full_key, 0) orelse full_key.len;
+    const first_comp = full_key[0..first_dot];
+    for (list.items) |*existing| {
+        if (existing.key) |ek| {
+            if (std.mem.eql(u8, ek, first_comp) and existing.kind == .inline_table) {
+                const rest = full_key[first_dot + 1 ..];
+                var child_list: std.ArrayList(doc.Scalar) = .empty;
+                if (existing.children.len > 0) {
+                    child_list = try std.ArrayList(doc.Scalar).initCapacity(alloc, existing.children.len);
+                    try child_list.appendSlice(alloc, existing.children);
+                    // Zero out so errdefer won't double-free the originals
+                    for (existing.children) |*c| c.* = .{ .kind = .bare, .raw = "", .span = .{ .offset = 0, .length = 0 } };
+                    alloc.free(existing.children);
+                }
+                errdefer child_list.deinit(alloc);
+                try insertDottedInlineKey(alloc, &child_list, rest, val);
+                existing.children = try child_list.toOwnedSlice(alloc);
+                return;
+            }
+        }
+    }
+    const nested = try buildNestedInlineScalar(alloc, full_key, val);
+    try list.append(alloc, nested);
 }
 
 // ── Value kind classification ────────────────────────────────────────────
@@ -1212,7 +1351,6 @@ fn isInvalidTimePart(raw: []const u8) bool {
     const min = parts.next() orelse return true;
     const sec = parts.next();
     if (parts.next() != null) return true;
-    if (sec == null) return true; // TOML requires seconds
     if (h.len != 2 or min.len != 2) return true;
     const hour = std.fmt.parseInt(u8, h, 10) catch return true;
     const minute = std.fmt.parseInt(u8, min, 10) catch return true;
@@ -1432,13 +1570,26 @@ fn parseDottedKeyPath(ctx: ParseContext, alloc: std.mem.Allocator) (std.mem.Allo
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(alloc);
     {
+        // Skip leading whitespace (space/tab) before first key component
+        const s0 = ctx.stream();
+        while (s0.peekByte(0)) |b| {
+            if (b == ' ' or b == '\t') { _ = s0.nextByte(); } else break;
+        }
         const first = try simple_key.parseNext(ctx);
         try parts.append(alloc, try decodeKeyComponent(alloc, first));
     }
     while (true) {
         const s = ctx.stream();
+        // Skip optional whitespace before the dot (TOML 1.1 allows spaces in table headers)
+        while (s.peekByte(0)) |b| {
+            if (b == ' ' or b == '\t') { _ = s.nextByte(); } else break;
+        }
         if (s.peekByte(0) != @as(?u8, '.')) break;
         _ = s.nextByte();
+        // Skip optional whitespace after the dot
+        while (s.peekByte(0)) |b| {
+            if (b == ' ' or b == '\t') { _ = s.nextByte(); } else break;
+        }
         const next = try simple_key.parseNext(ctx);
         try parts.append(alloc, try decodeKeyComponent(alloc, next));
     }
@@ -1708,8 +1859,12 @@ fn stringComplete(value_text: []const u8, quote: u8) bool {
         return false;
     }
     if (value_text.len < 6) return false;
-    var trailing_q: usize = 0;
+    // Skip trailing non-quote chars (may be a comment after the closing """)
     var j: usize = value_text.len;
+    while (j > 0 and value_text[j - 1] != quote) : (j -= 1) {}
+    // Skip the opening delimiter (first 3 quotes) so we don't count it as closing
+    if (j <= 3) return false;
+    var trailing_q: usize = 0;
     while (j > 0 and value_text[j - 1] == quote) : (j -= 1) trailing_q += 1;
     return trailing_q >= 3;
 }
@@ -1855,7 +2010,7 @@ fn findInlineKeyEnd(text: []const u8, pos: usize) usize {
     var i: usize = pos;
     while (i < text.len) {
         switch (text[i]) {
-            ' ', '\t', '=' => return i,
+            '=' => return i,
             '"' => { i += 1; while (i < text.len and text[i] != '"') : (i += 1) { if (text[i] == '\\' and i + 1 < text.len) i += 1; } if (i < text.len) i += 1; },
             '\'' => { i += 1; while (i < text.len and text[i] != '\'') : (i += 1) {} if (i < text.len) i += 1; },
             else => i += 1,
@@ -1945,7 +2100,6 @@ test "parse local date and time" {
 
 test "invalid datetime fails" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "ts = 1979-05-27T07:32\n", null));
     try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "d = 1979-5-27\n", null));
 }
 
