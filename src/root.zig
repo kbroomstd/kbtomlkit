@@ -12,7 +12,11 @@ test "mut table add rejects duplicate with diagnostic" {
     defer doc.deinit(gpa);
     var t = mut.Table.root(&doc);
     var d: mut.Diagnostic = undefined;
-    const result = t.add(gpa, "k", try mut.integer(gpa, @as(i64, 2)), &d);
+    const item = try mut.integer(gpa, @as(i64, 2));
+    const result = t.add(gpa, "k", item, &d);
+    if (result) |_| {} else |_| {
+        gpa.free(item.integer.raw);
+    }
     try std.testing.expectError(error.KeyAlreadyPresent, result);
     try std.testing.expectEqualStrings("kbtomlkit::key_already_present", d.code().?);
 }
@@ -38,11 +42,10 @@ test "mut table set replaces existing key" {
 }
 
 test "mut table count and iterator" {
-    // test hangs
-    if (true) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var doc = try parser.parse(gpa, "x.toml", "a = 1\nb = 2\nc = 3\n");
     defer doc.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 3), doc.entries.items.len);
     var t = mut.Table.root(&doc);
     try std.testing.expectEqual(@as(usize, 3), t.count());
     try std.testing.expect(t.contains("a"));

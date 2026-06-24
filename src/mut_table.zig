@@ -48,8 +48,9 @@ pub const Table = struct {
         index: usize = 0,
 
         pub fn next(self: *Iterator) ?Entry {
-            while (self.index < self.entries.len) : (self.index += 1) {
+            while (self.index < self.entries.len) {
                 const e = self.entries[self.index];
+                self.index += 1;
                 if (e.kind != .key_value) continue;
                 if (!std.mem.eql(u8, e.path, self.prefix)) continue;
                 if (self.table_index) |want| if (e.table_index != want) continue;
@@ -148,16 +149,19 @@ pub const Table = struct {
         if (self.findKeyValueIndex(key)) |idx| {
             const new_scalar = itemToScalar(gpa, item, diag) orelse return error.KeyTypeError;
             const entry = &self.doc.entries.items[idx];
-            gpa.free(entry.value.raw);
-            if (entry.value.children.len > 0) gpa.free(entry.value.children);
+            gpa.free(entry.key);
+            entry.key = escaped;
+            doc_mod.Document.deinitScalar(gpa, &entry.value);
             entry.value = new_scalar;
             return;
         }
 
         const new_scalar = itemToScalar(gpa, item, diag) orelse return error.KeyTypeError;
+        const path_dup = try gpa.dupe(u8, self.prefix);
+        errdefer gpa.free(path_dup);
         try self.doc.entries.append(gpa, .{
             .kind = .key_value,
-            .path = self.prefix,
+            .path = path_dup,
             .table_index = self.table_index orelse 0,
             .parent_array_index = 0,
             .key = escaped,
@@ -188,9 +192,11 @@ pub const Table = struct {
         }
 
         const new_scalar = itemToScalar(gpa, item, diag) orelse return error.KeyTypeError;
+        const path_dup = try gpa.dupe(u8, self.prefix);
+        errdefer gpa.free(path_dup);
         try self.doc.entries.append(gpa, .{
             .kind = .key_value,
-            .path = self.prefix,
+            .path = path_dup,
             .table_index = self.table_index orelse 0,
             .parent_array_index = 0,
             .key = escaped,
@@ -211,9 +217,11 @@ pub const Table = struct {
     ) Error!void {
         const escaped = validateKey(gpa, key, diag) orelse return error.InvalidPath;
         const new_scalar = itemToScalar(gpa, item, diag) orelse return error.KeyTypeError;
+        const path_dup = try gpa.dupe(u8, self.prefix);
+        errdefer gpa.free(path_dup);
         try self.doc.entries.append(gpa, .{
             .kind = .key_value,
-            .path = self.prefix,
+            .path = path_dup,
             .table_index = self.table_index orelse 0,
             .parent_array_index = 0,
             .key = escaped,
@@ -325,8 +333,8 @@ fn itemToScalar(_: Allocator, item: mut.Item, diag: ?*mut.Diagnostic) ?doc_mod.S
 
 fn freeEntry(gpa: Allocator, entry: doc_mod.Entry) void {
     gpa.free(entry.key);
-    gpa.free(entry.value.raw);
-    if (entry.value.children.len > 0) gpa.free(entry.value.children);
+    gpa.free(entry.path);
+    doc_mod.Document.deinitScalar(gpa, @constCast(&entry.value));
     if (entry.leading.len > 0) gpa.free(entry.leading);
     if (entry.trailing.len > 0) gpa.free(entry.trailing);
 }
@@ -368,7 +376,9 @@ test "table add rejects duplicate with diagnostic" {
 
     var t = Table.root(&doc);
     var d: mut.Diagnostic = undefined;
-    const result = t.add(gpa, "k", try mut.integer(gpa, @as(i64, 2)), &d);
+    const item = try mut.integer(gpa, @as(i64, 2));
+    const result = t.add(gpa, "k", item, &d);
+    if (result) |_| {} else |_| gpa.free(item.integer.raw);
     try testing.expectError(error.KeyAlreadyPresent, result);
     try testing.expectEqualStrings("kbtomlkit::key_already_present", d.code().?);
 }
@@ -384,10 +394,7 @@ test "table remove raises non-existent with diagnostic" {
     try testing.expectError(error.NonExistentKey, result);
     try testing.expectEqualStrings("kbtomlkit::non_existent_key", d.code().?);
 }
-
 test "table count and iterator on parsed document" {
-    // test hangs
-    if (true) return error.SkipZigTest;
     const gpa = testing.allocator;
     var doc = try makeDoc(gpa, "a = 1\nb = 2\nc = 3\n");
     defer doc.deinit(gpa);

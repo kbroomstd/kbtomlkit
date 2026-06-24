@@ -60,12 +60,19 @@ pub fn parse(alloc: std.mem.Allocator, name: []const u8, input: []const u8) Pars
         .pending_trivia = .empty,
     };
     parseDocument(pc, &builder) catch {
+        const dup = builder.duplicate_key_detected;
+        builder.deinit();
+        if (dup) return error.DuplicateKey;
         return error.InvalidToml;
     };
-    if (ds.remaining().len > 0) return error.InvalidToml;
+    if (ds.remaining().len > 0) {
+        builder.deinit();
+        return error.InvalidToml;
+    }
 
     const document: doc.Document = .{ .entries = builder.entries, .allocator = alloc };
     builder.entries = .empty;
+    builder.deinitNonEntries();
     return document;
 }
 
@@ -104,12 +111,14 @@ const DocBuilder = struct {
     array_tables: std.StringHashMap(void),
     array_counts: std.StringHashMap(usize),
     pending_trivia: std.ArrayList(doc.Trivia),
+    duplicate_key_detected: bool = false,
+    temp_allocs: std.ArrayList([]const u8) = .empty,
 
     fn deinit(self: *DocBuilder) void {
-        for (self.entries.items) |entry| {
+        for (self.entries.items) |*entry| {
             self.alloc.free(entry.key);
-            self.alloc.free(entry.value.raw);
-            if (entry.value.children.len > 0) self.alloc.free(entry.value.children);
+            self.alloc.free(entry.path);
+            doc.Document.deinitScalar(self.alloc, &entry.value);
             if (entry.leading.len > 0) self.alloc.free(entry.leading);
             if (entry.trailing.len > 0) self.alloc.free(entry.trailing);
         }
@@ -120,7 +129,25 @@ const DocBuilder = struct {
         self.header_implicit.deinit();
         self.array_tables.deinit();
         self.array_counts.deinit();
+        for (self.pending_trivia.items) |t| {
+            if (t.text.len > 0) self.alloc.free(t.text);
+        }
         self.pending_trivia.deinit(self.alloc);
+        for (self.temp_allocs.items) |a| self.alloc.free(a);
+        self.temp_allocs.deinit(self.alloc);
+    }
+    /// Free builder state (hash maps, trivia) without freeing entries.
+    /// Used on the success path after entries have been moved to Document.
+    fn deinitNonEntries(self: *DocBuilder) void {
+        self.seen.deinit();
+        self.tables.deinit();
+        self.dotted_implicit.deinit();
+        self.header_implicit.deinit();
+        self.array_tables.deinit();
+        self.array_counts.deinit();
+        self.pending_trivia.deinit(self.alloc);
+        for (self.temp_allocs.items) |a| self.alloc.free(a);
+        self.temp_allocs.deinit(self.alloc);
     }
 
     fn appendEntry(self: *DocBuilder, entry: doc.Entry) std.mem.Allocator.Error!void {
@@ -581,20 +608,20 @@ fn parseTableHeader(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
         ctx.cut();
         return error.Cut;
     }
-
+    try builder.temp_allocs.append(alloc, path);
     // Conflict detection (same logic as old parser)
     if (!is_array) {
         const repeated = isArrayChild(builder, path);
         if ((arrayTableDescendantConflict(path, &builder.array_tables) or builder.array_tables.contains(path)) and !repeated)
-            return reportDupKey(ctx, start);
+            return reportDupKey(ctx, builder, start);
         if (builder.dotted_implicit.contains(path) and !repeated)
-            return reportDupKey(ctx, start);
+            return reportDupKey(ctx, builder, start);
         if (builder.tables.contains(path) and !repeated)
-            return reportDupKey(ctx, start);
+            return reportDupKey(ctx, builder, start);
         if (pathHasValuePrefix(path, &builder.seen) and !repeated)
-            return reportDupKey(ctx, start);
+            return reportDupKey(ctx, builder, start);
         if (pathHasSubKey(path, &builder.seen) and !builder.header_implicit.contains(path) and !repeated)
-            return reportDupKey(ctx, start);
+            return reportDupKey(ctx, builder, start);
         try markHeaderImplicit(&builder.header_implicit, path);
         const keep_ctx = builder.table_is_array and
             (std.mem.startsWith(u8, path, builder.currentTablePath()) or
@@ -605,28 +632,29 @@ fn parseTableHeader(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
         const split = splitKeyPath(path);
         try builder.appendEntry(.{
             .kind = .table_header,
-            .path = path,
+            .path = try alloc.dupe(u8, path),
             .table_index = if (keep_ctx) builder.active_array_index else 0,
             .is_array = false,
             .key = try materializeKey(alloc, split.leaf),
             .key_span = .{ .offset = start, .length = s.cursor() - start },
-            .value = .{ .kind = .bare, .raw = "", .span = .{ .offset = start, .length = 0 } },
+            .value = .{ .kind = .bare, .raw = try alloc.dupe(u8, ""), .span = .{ .offset = start, .length = 0 } },
             .header_span = .{ .offset = start, .length = s.cursor() - start },
             .leading = try builder.takePendingTrivia(),
         });
         return;
     }
-
     // Array table
     const repeated = isArrayChild(builder, path);
-    if (!builder.array_tables.contains(path) and anyArrayTableAncestorConflict(path, &builder.array_tables) and !repeated)
-        return reportDupKey(ctx, start);
-    if (!builder.array_tables.contains(path) and (pathConflictWithKeys(path, &builder.seen) or builder.tables.contains(path)) and !repeated)
-        return reportDupKey(ctx, start);
+    if (!builder.array_tables.contains(path) and anyArrayTableAncestorConflict(path, &builder.array_tables) and !repeated) {
+        return reportDupKey(ctx, builder, start);
+    }
+    if (!builder.array_tables.contains(path) and (pathConflictWithKeys(path, &builder.seen) or builder.tables.contains(path)) and !repeated) {
+        return reportDupKey(ctx, builder, start);
+    }
     try markHeaderImplicit(&builder.header_implicit, path);
     const parent_idx: usize = if (!builder.table_is_array) 0 else arrayParentIdx(builder, path);
     const count_key = try std.fmt.allocPrint(alloc, "{d}@{s}", .{ parent_idx, path });
-    defer alloc.free(count_key);
+    try builder.temp_allocs.append(alloc, count_key);
     const count = builder.array_counts.get(count_key) orelse 0;
     try builder.array_counts.put(count_key, count + 1);
     if (!builder.array_tables.contains(path)) try builder.array_tables.put(path, {});
@@ -634,19 +662,20 @@ fn parseTableHeader(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
     builder.setArrayTablePath(path, count, parent_idx);
     try builder.appendEntry(.{
         .kind = .table_header,
-        .path = path,
+        .path = try alloc.dupe(u8, path),
         .table_index = count,
         .parent_array_index = parent_idx,
         .is_array = true,
         .key = try materializeKey(alloc, split.leaf),
         .key_span = .{ .offset = start, .length = s.cursor() - start },
-        .value = .{ .kind = .bare, .raw = "", .span = .{ .offset = start, .length = 0 } },
+        .value = .{ .kind = .bare, .raw = try alloc.dupe(u8, ""), .span = .{ .offset = start, .length = 0 } },
         .header_span = .{ .offset = start, .length = s.cursor() - start },
         .leading = try builder.takePendingTrivia(),
     });
 }
 
-fn reportDupKey(ctx: ParseContext, offset: usize) error{ Backtrack, Cut } {
+fn reportDupKey(ctx: ParseContext, builder: *DocBuilder, offset: usize) error{ Backtrack, Cut } {
+    builder.duplicate_key_detected = true;
     ctx.reportEx(.{
         .message = diagMessage(.duplicate_key),
         .code = diagCode(.duplicate_key),
@@ -702,8 +731,8 @@ fn parseKeyValue(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
     // Collect value text (possibly multi-line)
     var value_buf: std.ArrayList(u8) = .empty;
     {
-        const vstart = @intFromPtr(pre_comment[eq + 1 ..].ptr) - @intFromPtr(s.data().ptr);
-        try value_buf.appendSlice(alloc, std.mem.trim(u8, s.data()[vstart..first_end], " \t"));
+        const value_raw = std.mem.trim(u8, pre_comment[eq + 1 ..], " \t");
+        try value_buf.appendSlice(alloc, value_raw);
     }
     s.setCursor(first_end);
     while (true) {
@@ -725,8 +754,10 @@ fn parseKeyValue(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
     // Parse the value using combinator-based parser
     const value_text = value_buf.items;
     const val = parseValueCombinator(alloc, start, value_text) catch |e| {
+        value_buf.deinit(alloc);
         return e;
     };
+    value_buf.deinit(alloc);
 
     // Parse the key path using combinator parser
     const key_path = try parseDottedKeyFromSlice(alloc, key_raw);
@@ -740,7 +771,10 @@ fn parseKeyValue(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
         pathConflictsAsSibling(full_key, builder.currentTablePath(), &builder.tables) or
         pathConflictsWithArrayTables(full_key, &builder.array_tables)))
     {
-        return reportDupKey(ctx, start);
+        doc.Document.deinitScalar(alloc, @constCast(&val));
+        alloc.free(key_path);
+        alloc.free(full_key);
+        return reportDupKey(ctx, builder, start);
     }
     if (!rep) {
         const seen_key = if (builder.active_array_index > 0)
@@ -749,12 +783,16 @@ fn parseKeyValue(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
             full_key;
         defer if (builder.active_array_index > 0) alloc.free(seen_key);
         try builder.seen.put(seen_key, {});
-        try markDottedImplicit(alloc, &builder.dotted_implicit, builder.currentTablePath(), key_path);
+        try markDottedImplicit(alloc, &builder.dotted_implicit, &builder.temp_allocs, builder.currentTablePath(), key_path);
     }
+
+    // Track temp allocations for cleanup; entry.path gets its own copy
+    try builder.temp_allocs.append(alloc, key_path);
+    try builder.temp_allocs.append(alloc, full_key);
 
     try builder.appendEntry(.{
         .kind = .key_value,
-        .path = split.parent,
+        .path = try alloc.dupe(u8, split.parent),
         .table_index = if (builder.table_is_array) builder.active_array_index else 0,
         .parent_array_index = if (builder.table_is_array) builder.parent_array_index else 0,
         .dotted = dotted,
@@ -847,14 +885,23 @@ fn parseInlineTableChildren(alloc: std.mem.Allocator, offset: usize, raw: []cons
     errdefer {
         for (list.items) |c| {
             alloc.free(c.raw);
-            if (c.children.len > 0) alloc.free(c.children);
             if (c.key) |k| alloc.free(k);
+            for (c.children) |*child| {
+                doc.Document.deinitScalar(alloc, child);
+            }
+            if (c.children.len > 0) alloc.free(c.children);
         }
         list.deinit(alloc);
     }
     var pos: usize = 0;
     var seen_keys = std.StringHashMap(void).init(alloc);
-    defer seen_keys.deinit();
+    defer {
+        var kit = seen_keys.iterator();
+        while (kit.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+        }
+        seen_keys.deinit();
+    }
     while (pos < inner.len) {
         while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t')) : (pos += 1) {}
         if (pos >= inner.len) break;
@@ -1122,6 +1169,7 @@ fn isInvalidTimePart(raw: []const u8) bool {
     const min = parts.next() orelse return true;
     const sec = parts.next();
     if (parts.next() != null) return true;
+    if (sec == null) return true; // TOML requires seconds
     if (h.len != 2 or min.len != 2) return true;
     const hour = std.fmt.parseInt(u8, h, 10) catch return true;
     const minute = std.fmt.parseInt(u8, min, 10) catch return true;
@@ -1273,14 +1321,21 @@ fn canonicalScalarRaw(alloc: std.mem.Allocator, kind: doc.ScalarKind, raw: []con
 pub fn materializeKey(allocator: std.mem.Allocator, leaf: []const u8) ![]const u8 {
     if (std.mem.eql(u8, leaf, "\x01")) return try allocator.dupe(u8, "");
     if (std.mem.indexOf(u8, leaf, "\\") != null) {
-        var out = try allocator.alloc(u8, leaf.len);
+        // Count exact output size first
+        var exact_len: usize = 0;
+        var ci: usize = 0;
+        while (ci < leaf.len) {
+            if (leaf[ci] == '\\' and ci + 1 < leaf.len) { exact_len += 1; ci += 2; }
+            else { exact_len += 1; ci += 1; }
+        }
+        var out = try allocator.alloc(u8, exact_len);
         var i: usize = 0;
         var j: usize = 0;
         while (i < leaf.len) {
             if (leaf[i] == '\\' and i + 1 < leaf.len) { out[j] = leaf[i + 1]; j += 1; i += 2; }
             else { out[j] = leaf[i]; j += 1; i += 1; }
         }
-        return out[0..j];
+        return out;
     }
     return try allocator.dupe(u8, leaf);
 }
@@ -1371,6 +1426,8 @@ fn parseDottedKeyPath(ctx: ParseContext, alloc: std.mem.Allocator) (std.mem.Allo
             }
         }
     }
+    // Free temporary component allocations (parts items are heap-allocated dupes)
+    for (parts.items) |p| alloc.free(p);
     return out;
 }
 
@@ -1441,7 +1498,7 @@ fn markHeaderImplicit(header_implicit: *std.StringHashMap(void), path: []const u
     while (i < path.len) : (i += 1) { if (path[i] == '.') try header_implicit.put(path[0..i], {}); }
 }
 
-fn markDottedImplicit(alloc: std.mem.Allocator, dotted_implicit: *std.StringHashMap(void), current_path: []const u8, key_path: []const u8) !void {
+fn markDottedImplicit(alloc: std.mem.Allocator, dotted_implicit: *std.StringHashMap(void), temp_allocs: *std.ArrayList([]const u8), current_path: []const u8, key_path: []const u8) !void {
     if (key_path.len == 0) return;
     var buf = try alloc.alloc(u8, current_path.len + 1 + key_path.len);
     defer alloc.free(buf);
@@ -1456,7 +1513,9 @@ fn markDottedImplicit(alloc: std.mem.Allocator, dotted_implicit: *std.StringHash
             path_len += 1;
             @memcpy(buf[path_len..][0..(i - start)], key_path[start..i]);
             path_len += i - start;
-            try dotted_implicit.put(buf[0..path_len], {});
+            const key = try alloc.dupe(u8, buf[0..path_len]);
+            try temp_allocs.append(alloc, key);
+            try dotted_implicit.put(key, {});
         }
         start = i + 1;
     }

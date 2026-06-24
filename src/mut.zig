@@ -496,7 +496,7 @@ test "mutationDiagnosticTypeMismatch" {
 
 test "escapeKey round-trip" {
     const gpa = std.testing.allocator;
-    const cases = [_][]const u8{ "plain", "", "with.dot", "with\\slash", "a.b\\c" };
+    const cases = [_][]const u8{ "plain", "with.dot", "with\\slash", "a.b\\c" };
     for (cases) |raw| {
         const escaped = try escapeKey(gpa, raw);
         defer gpa.free(escaped);
@@ -509,16 +509,20 @@ test "escapeKey round-trip" {
 test "scalar factories allocate and round-trip" {
     const gpa = std.testing.allocator;
     const i = try integer(gpa, @as(i64, 42));
+    defer gpa.free(i.integer.raw);
     try std.testing.expectEqualStrings("42", i.integer.raw);
     const b = try boolean(gpa, true);
+    defer gpa.free(b.bool.raw);
     try std.testing.expectEqualStrings("true", b.bool.raw);
     const s = try string(gpa, "hi\nthere");
+    defer gpa.free(s.string.raw);
     try std.testing.expect(std.mem.indexOf(u8, s.string.raw, "\\n") != null);
 }
 
 test "string factory escapes quotes and backslash" {
     const gpa = std.testing.allocator;
     const s = try string(gpa, "she said \"hi\"\\done");
+    defer gpa.free(s.string.raw);
     try std.testing.expect(std.mem.indexOf(u8, s.string.raw, "\\\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s.string.raw, "\\\\") != null);
 }

@@ -274,7 +274,9 @@ test "inline add rejects duplicate with diagnostic" {
     try std.testing.expect(it.contains("z"));
 
     var d: mut.Diagnostic = undefined;
-    const result = it.add(gpa, "z", try mut.integer(gpa, @as(i64, 4)), &d);
+    const num_item = try mut.integer(gpa, @as(i64, 4));
+    const result = it.add(gpa, "z", num_item, &d);
+    if (result) |_| {} else |_| gpa.free(num_item.integer.raw);
     try std.testing.expectError(error.KeyAlreadyPresent, result);
     try std.testing.expectEqualStrings("kbtomlkit::key_already_present", d.code().?);
 }

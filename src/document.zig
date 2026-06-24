@@ -73,13 +73,28 @@ pub const Document = struct {
         return self.allocator;
     }
 
+    pub fn deinitScalar(gpa: Allocator, scalar: *Scalar) void {
+        gpa.free(scalar.raw);
+        if (scalar.key) |k| gpa.free(k);
+        for (scalar.children) |*child| {
+            deinitScalar(gpa, child);
+        }
+        if (scalar.children.len > 0) gpa.free(scalar.children);
+    }
+
     /// Release all allocated memory. Standard pattern for unmanaged
     pub fn deinit(self: *Self, gpa: Allocator) void {
-        for (self.entries.items) |entry| {
+        for (self.entries.items) |*entry| {
             gpa.free(entry.key);
-            gpa.free(entry.value.raw);
-            if (entry.value.children.len > 0) gpa.free(entry.value.children);
+            gpa.free(entry.path);
+            deinitScalar(gpa, &entry.value);
+            for (entry.leading) |t| {
+                if (t.text.len > 0) gpa.free(t.text);
+            }
             if (entry.leading.len > 0) gpa.free(entry.leading);
+            for (entry.trailing) |t| {
+                if (t.text.len > 0) gpa.free(t.text);
+            }
             if (entry.trailing.len > 0) gpa.free(entry.trailing);
         }
         self.entries.deinit(gpa);

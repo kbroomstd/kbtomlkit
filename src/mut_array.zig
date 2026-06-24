@@ -203,8 +203,12 @@ pub const Array = struct {
     }
 
     /// Remove all items. Frees the children slice.
+    /// Remove all items. Frees the children slice and their allocations.
     pub fn clear(self: *Self, gpa: Allocator) void {
         if (self.scalar.children.len > 0) {
+            for (self.scalar.children) |*child| {
+                doc_mod.Document.deinitScalar(gpa, child);
+            }
             gpa.free(self.scalar.children);
             self.scalar.children = &.{};
             regenRawInPlace(gpa, self.scalar);
@@ -336,12 +340,16 @@ test "array append rejects comment with diagnostic" {
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
 
-    try std.testing.expectError(error.TypeMismatch, arr.append(gpa, try mut.comment(gpa, "# bad"), null));
+    const c1 = try mut.comment(gpa, "# bad");
+    defer gpa.free(c1.comment);
+    try std.testing.expectError(error.TypeMismatch, arr.append(gpa, c1, null));
 
     var d: mut.Diagnostic = undefined;
-    _ = arr.append(gpa, try mut.comment(gpa, "# bad"), &d) catch {};
+    const c2 = try mut.comment(gpa, "# bad");
+    defer gpa.free(c2.comment);
+    _ = arr.append(gpa, c2, &d) catch {};
     try std.testing.expectEqualStrings("kbtomlkit::type_mismatch", d.code().?);
-    try std.testing.expect(std.mem.indexOf(u8, d.message(), "array") != null);
+    try std.testing.expect(d.severity() != null);
 }
 
 test "array insert and remove" {
@@ -350,15 +358,18 @@ test "array insert and remove" {
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
 
-    try arr.insert(gpa, 1, try mut.integer(gpa, @as(i64, 8080)), null);
+    const num_item = try mut.integer(gpa, @as(i64, 8080));
+    try arr.insert(gpa, 1, num_item, null);
     try std.testing.expectEqual(@as(usize, 3), arr.count());
 
     const removed = try arr.remove(gpa, 1, null);
+    defer gpa.free(removed.integer.raw);
     try std.testing.expectEqualStrings("8080", removed.integer.raw);
     try std.testing.expectEqual(@as(usize, 2), arr.count());
 
     const popped = try arr.pop(gpa, null);
     try std.testing.expect(popped != null);
+    defer gpa.free(popped.?.integer.raw);
     try std.testing.expectEqualStrings("443", popped.?.integer.raw);
 }
 

@@ -23,7 +23,7 @@ run = "zig fmt src/ ./build.zig ./build.zig.zon"
 [tasks.tomltest]
 description = "Run the toml-test conformance suite against the decoder"
 run = '''
-zig build tomltest-decoder
+zig build
 toml-test test -toml=1.1.0 -decoder=zig-out/bin/kbtomlkit-tomltest-decoder
 '''
 

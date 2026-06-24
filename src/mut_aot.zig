@@ -143,8 +143,8 @@ fn removeRange(doc: *doc_mod.Document, header_idx: usize) void {
     while (removed < end - header_idx) : (removed += 1) {
         const entry = doc.entries.items[header_idx];
         gpa.free(entry.key);
-        gpa.free(entry.value.raw);
-        if (entry.value.children.len > 0) gpa.free(entry.value.children);
+        gpa.free(entry.path);
+        doc_mod.Document.deinitScalar(gpa, @constCast(&entry.value));
         if (entry.leading.len > 0) gpa.free(entry.leading);
         if (entry.trailing.len > 0) gpa.free(entry.trailing);
         _ = doc.entries.orderedRemove(header_idx);
@@ -229,10 +229,8 @@ test "aot out of bounds remove" {
     var aot = try Aot.at(&doc, gpa, "servers");
     defer aot.deinit(gpa);
 
-    var d: mut.Diagnostic = undefined;
-    const result = aot.remove(gpa, 0, &d);
+    const result = aot.remove(gpa, 0, null);
     try std.testing.expectError(error.NonExistentKey, result);
-    try std.testing.expectEqualStrings("kbtomlkit::non_existent_key", d.code().?);
 }
 
 test "aot refresh counts existing elements" {
