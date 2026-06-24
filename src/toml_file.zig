@@ -55,7 +55,7 @@ pub const TomlFile = struct {
             content;
         defer if (normalized.ptr != content.ptr) gpa.free(normalized);
 
-        return parser_mod.parse(gpa, sub_path, normalized) catch |err| {
+        return parser_mod.parse(gpa, sub_path, normalized, null) catch |err| {
             if (diag) |d| d.* = parseErrorDiagnostic(sub_path, err);
             return err;
         };
@@ -227,7 +227,7 @@ test "TomlFile round-trip" {
     var tf = try TomlFile.init(gpa, "example.toml");
     defer tf.deinit(gpa);
 
-    var doc = try parser_mod.parse(gpa, "", "");
+    var doc = try parser_mod.parse(gpa, "", "", null);
     defer doc.deinit(gpa);
     var root = mut.Table.root(&doc);
     try root.set(gpa, "owner", try mut.string(gpa, "John"), null);

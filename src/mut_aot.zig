@@ -182,7 +182,7 @@ fn failOom(diag: ?*mut.Diagnostic) Error {
 const parser_mod = @import("parser.zig");
 
 fn makeDoc(gpa: Allocator, input: []const u8) !doc_mod.Document {
-    return try parser_mod.parse(gpa, "x.toml", input);
+    return try parser_mod.parse(gpa, "x.toml", input, null);
 }
 
 test "aot append pop" {

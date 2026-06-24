@@ -14,7 +14,7 @@ pub fn encodeDecoderOutput(allocator: std.mem.Allocator, document: *const doc.Do
 }
 
 pub fn decodeInput(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var document = try kbtomlkit.parser.parse(allocator, "stdin.toml", input);
+    var document = try kbtomlkit.parser.parse(allocator, "stdin.toml", input, null);
     defer document.deinit(allocator);
     return try encodeDecoderOutput(allocator, &document);
 }

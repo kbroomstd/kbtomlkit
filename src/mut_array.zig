@@ -305,7 +305,7 @@ fn oomDiagnostic(span: kbdiagnostic.SourceSpan) kbdiagnostic.Diagnostic {
 const parser_mod = @import("parser.zig");
 
 fn makeDocWithArray(gpa: Allocator, input: []const u8) !doc_mod.Document {
-    return try parser_mod.parse(gpa, "x.toml", input);
+    return try parser_mod.parse(gpa, "x.toml", input, null);
 }
 
 fn findArrayScalar(doc: *doc_mod.Document) *doc_mod.Scalar {

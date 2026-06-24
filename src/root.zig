@@ -8,7 +8,7 @@ pub const toml_file = @import("toml_file.zig");
 
 test "mut table add rejects duplicate with diagnostic" {
     const gpa = std.testing.allocator;
-    var doc = try parser.parse(gpa, "x.toml", "k = 1\n");
+    var doc = try parser.parse(gpa, "x.toml", "k = 1\n", null);
     defer doc.deinit(gpa);
     var t = mut.Table.root(&doc);
     var d: mut.Diagnostic = undefined;
@@ -23,7 +23,7 @@ test "mut table add rejects duplicate with diagnostic" {
 
 test "mut table remove raises non-existent with diagnostic" {
     const gpa = std.testing.allocator;
-    var doc = try parser.parse(gpa, "x.toml", "k = 1\n");
+    var doc = try parser.parse(gpa, "x.toml", "k = 1\n", null);
     defer doc.deinit(gpa);
     var t = mut.Table.root(&doc);
     var d: mut.Diagnostic = undefined;
@@ -34,7 +34,7 @@ test "mut table remove raises non-existent with diagnostic" {
 
 test "mut table set replaces existing key" {
     const gpa = std.testing.allocator;
-    var doc = try parser.parse(gpa, "x.toml", "host = \"127.0.0.1\"\n");
+    var doc = try parser.parse(gpa, "x.toml", "host = \"127.0.0.1\"\n", null);
     defer doc.deinit(gpa);
     var t = mut.Table.root(&doc);
     try t.set(gpa, "host", try mut.string(gpa, "10.0.0.1"), null);
@@ -43,7 +43,7 @@ test "mut table set replaces existing key" {
 
 test "mut table count and iterator" {
     const gpa = std.testing.allocator;
-    var doc = try parser.parse(gpa, "x.toml", "a = 1\nb = 2\nc = 3\n");
+    var doc = try parser.parse(gpa, "x.toml", "a = 1\nb = 2\nc = 3\n", null);
     defer doc.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 3), doc.entries.items.len);
     var t = mut.Table.root(&doc);
@@ -68,7 +68,7 @@ test "TomlFile round-trip" {
     var tf = try toml_file.TomlFile.init(gpa, "example.toml");
     defer tf.deinit(gpa);
 
-    var doc = try parser.parse(gpa, "", "");
+    var doc = try parser.parse(gpa, "", "", null);
     defer doc.deinit(gpa);
     var root = mut.Table.root(&doc);
     try root.set(gpa, "owner", try mut.string(gpa, "John"), null);

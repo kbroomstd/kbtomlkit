@@ -32,9 +32,27 @@ const eof_fn = combinator.eof;
 // ── Public API ───────────────────────────────────────────────────────────
 pub const ParseError = error{ InvalidToml, DuplicateKey, OutOfMemory };
 
-/// Parse a TOML document from a `[]const u8` slice.
-/// This is the primary public entry point.
-pub fn parse(alloc: std.mem.Allocator, name: []const u8, input: []const u8) ParseError!doc.Document {
+/// Parse a TOML document from a kbwinnow Stream.
+/// Skip whitespace (space, tab, newline, carriage return) on the stream.
+fn skipWs(s: Stream) void {
+    while (s.peekByte(0)) |b| {
+        if (b == ' ' or b == '\t' or b == '\n' or b == '\r') {
+            _ = s.nextByte();
+        } else break;
+    }
+}
+
+/// Skip horizontal whitespace (space, tab only) on the stream.
+fn skipHws(s: Stream) void {
+    while (s.peekByte(0)) |b| {
+        if (b == ' ' or b == '\t') {
+            _ = s.nextByte();
+        } else break;
+    }
+}
+
+/// On error, `out_diagnostic` is set to the diagnostic with error details.
+pub fn parse(alloc: std.mem.Allocator, name: []const u8, input: []const u8, out_diagnostic: ?*?kbdiagnostic.Diagnostic) ParseError!doc.Document {
     // Validate UTF-8
     if (!isValidUtf8(input)) return error.InvalidToml;
 
@@ -61,11 +79,18 @@ pub fn parse(alloc: std.mem.Allocator, name: []const u8, input: []const u8) Pars
     };
     parseDocument(pc, &builder) catch {
         const dup = builder.duplicate_key_detected;
+        if (out_diagnostic) |od| od.* = ctx.diagnostic();
         builder.deinit();
         if (dup) return error.DuplicateKey;
         return error.InvalidToml;
     };
     if (ds.remaining().len > 0) {
+        ctx.reportEx(.{
+            .message = "unexpected content after value",
+            .code = diagCode(.unexpected_token),
+            .span = .{ .offset = ds.cursor(), .length = ds.remaining().len },
+        });
+        if (out_diagnostic) |od| od.* = ctx.diagnostic();
         builder.deinit();
         return error.InvalidToml;
     }
@@ -225,6 +250,7 @@ const BasicStringP = struct {
     pub fn parseNext(_: Self, ctx: ParseContext) error{ Backtrack, Cut }![]const u8 {
         const s = ctx.stream();
         if (s.peekByte(0) != @as(?u8, '"')) return error.Backtrack;
+        if (s.startsWith("\"\"\"")) return error.Backtrack; // let MlBasicStringP handle it
         const start = s.cursor();
         _ = s.nextByte();
         while (true) {
@@ -235,7 +261,7 @@ const BasicStringP = struct {
             if (b == '\\') {
                 const esc = s.nextByte() orelse return cutUnterm(ctx, start);
                 switch (esc) {
-                    '\\', '"', 'b', 't', 'n', 'f', 'r', '/', 'u', 'U', 'x', 'e' => {},
+                    '\\', '"', 'b', 't', 'n', 'f', 'r', 'u', 'U', 'x', 'e' => {},
                     else => return cutEscape(ctx, s.cursor() - 2, 2),
                 }
             }
@@ -249,6 +275,7 @@ const LiteralStringP = struct {
     pub fn parseNext(_: Self, ctx: ParseContext) error{ Backtrack, Cut }![]const u8 {
         const s = ctx.stream();
         if (s.peekByte(0) != @as(?u8, '\'')) return error.Backtrack;
+        if (s.startsWith("'''")) return error.Backtrack; // let MlLiteralStringP handle it
         const start = s.cursor();
         _ = s.nextByte();
         while (true) {
@@ -277,7 +304,7 @@ const MlBasicStringP = struct {
                 var q: usize = 1;
                 while (s.peekByte(@intCast(q - 1)) == @as(?u8, '"')) q += 1;
                 if (q >= 3) {
-                    s.setCursor(s.cursor() + (q - 3));
+                    s.setCursor(s.cursor() + (q - 1));
                     return s.data()[start..s.cursor()];
                 }
                 continue;
@@ -285,7 +312,7 @@ const MlBasicStringP = struct {
             if (b == '\\') {
                 const esc = s.nextByte() orelse return cutUnterm(ctx, start);
                 if (esc == ' ' or esc == '\t' or esc == '\n' or esc == '\r') {
-                    var saw_nl = false;
+                    var saw_nl = (esc == '\n' or esc == '\r');
                     while (true) {
                         const cb = s.peekByte(0) orelse break;
                         if (cb == '\n' or cb == '\r') saw_nl = true;
@@ -295,7 +322,7 @@ const MlBasicStringP = struct {
                     if (!saw_nl) return cutEscape(ctx, s.cursor() - 1, 1);
                 } else {
                     switch (esc) {
-                        '\\', '"', 'b', 't', 'n', 'f', 'r', '/', 'u', 'U', 'x', 'e' => {},
+                        '\\', '"', 'b', 't', 'n', 'f', 'r', 'u', 'U', 'x', 'e' => {},
                         else => return cutEscape(ctx, s.cursor() - 2, 2),
                     }
                 }
@@ -323,7 +350,7 @@ const MlLiteralStringP = struct {
                 var q: usize = 1;
                 while (s.peekByte(@intCast(q - 1)) == @as(?u8, '\'')) q += 1;
                 if (q >= 3) {
-                    s.setCursor(s.cursor() + (q - 3));
+                    s.setCursor(s.cursor() + (q - 1));
                     return s.data()[start..s.cursor()];
                 }
                 continue;
@@ -438,11 +465,7 @@ fn parseDocument(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
         if (s.remaining().len == 0) return;
         const line_start = s.cursor();
         // Skip leading whitespace (space/tab only, not newline).
-        while (s.peekByte(0)) |b| {
-            if (b == ' ' or b == '\t') {
-                _ = s.nextByte();
-            } else break;
-        }
+        skipHws(s);
         const content_start = s.cursor();
         if (content_start >= s.data().len) return;
 
@@ -727,6 +750,21 @@ fn parseKeyValue(ctx: ParseContext, builder: *DocBuilder) anyerror!void {
             .span = .{ .offset = start + trailing, .length = line_text.len - trailing },
         };
     } else null;
+    // Reject control characters in comments (TOML spec: comments may not contain control chars)
+    if (comment_idx) |ci| {
+        var cc: usize = ci;
+        while (cc < line_text.len) : (cc += 1) {
+            if (isControlChar(line_text[cc]) and line_text[cc] != '\t') {
+                ctx.reportEx(.{
+                    .message = "control character in comment",
+                    .code = diagCode(.invalid_escape),
+                    .span = .{ .offset = start + cc, .length = 1 },
+                });
+                ctx.cut();
+                return error.Cut;
+            }
+        }
+    }
 
     // Collect value text (possibly multi-line)
     var value_buf: std.ArrayList(u8) = .empty;
@@ -834,6 +872,9 @@ fn parseValueCombinator(alloc: std.mem.Allocator, offset: usize, raw: []const u8
         defer vctx.deinit();
         const result = string_parser.parseNext(vctx.asContext());
         if (result == error.Backtrack or result == error.Cut) return error.InvalidToml;
+        // Reject if extra content follows a single-line string
+        const is_multiline = raw.len >= 3 and ((raw[0] == '"' and raw[1] == '"' and raw[2] == '"') or (raw[0] == '\'' and raw[1] == '\'' and raw[2] == '\''));
+        if (!is_multiline and ds.remaining().len > 0) return error.InvalidToml;
     }
 
     // Store raw canonical form. Strings keep their quotes so
@@ -846,8 +887,10 @@ fn parseValueCombinator(alloc: std.mem.Allocator, offset: usize, raw: []const u8
     };
 
     if (kind == .array) {
+        if (raw.len < 2 or raw[raw.len - 1] != ']') return error.InvalidToml;
         val.children = try parseArrayChildren(alloc, offset, raw);
     } else if (kind == .inline_table) {
+        if (raw.len < 2 or raw[raw.len - 1] != '}') return error.InvalidToml;
         val.children = try parseInlineTableChildren(alloc, offset, raw);
     }
     return val;
@@ -903,17 +946,17 @@ fn parseInlineTableChildren(alloc: std.mem.Allocator, offset: usize, raw: []cons
         seen_keys.deinit();
     }
     while (pos < inner.len) {
-        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t')) : (pos += 1) {}
+        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         if (pos >= inner.len) break;
         const key_start = pos;
         const key_end = findInlineKeyEnd(inner, pos);
         if (key_end == pos) return error.InvalidToml;
         const key_text = inner[key_start..key_end];
         pos = key_end;
-        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t')) : (pos += 1) {}
+        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         if (pos >= inner.len or inner[pos] != '=') return error.InvalidToml;
         pos += 1;
-        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t')) : (pos += 1) {}
+        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         const val_start = pos;
         const val_end = findValueEnd(inner, pos);
         if (val_end == pos) return error.InvalidToml;
@@ -929,7 +972,7 @@ fn parseInlineTableChildren(alloc: std.mem.Allocator, offset: usize, raw: []cons
         val.key = try materializeKey(alloc, split.leaf);
         try list.append(alloc, val);
         pos = val_end;
-        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t')) : (pos += 1) {}
+        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == '\n' or inner[pos] == '\r')) : (pos += 1) {}
         if (pos < inner.len and inner[pos] == ',') pos += 1;
     }
     return list.toOwnedSlice(alloc);
@@ -1399,13 +1442,25 @@ fn parseDottedKeyPath(ctx: ParseContext, alloc: std.mem.Allocator) (std.mem.Allo
         const next = try simple_key.parseNext(ctx);
         try parts.append(alloc, try decodeKeyComponent(alloc, next));
     }
+    // Ensure the entire input was consumed (validates bare key has no trailing junk)
+    // Allow trailing whitespace (space/tab) which may exist in dotted keys like "count . b"
+    {
+        const s = ctx.stream();
+        const remaining = s.remaining();
+        var i: usize = 0;
+        while (i < remaining.len and (remaining[i] == ' ' or remaining[i] == '\t')) i += 1;
+        if (i < remaining.len) return error.Backtrack;
+    }
     // Build materialized path: join with `.`, escape `.` and `\` in components.
     var total: usize = 0;
     for (parts.items, 0..) |p, i| {
         if (i > 0) total += 1;
-        // Each component might need escaping
-        for (p) |c| {
-            if (c == '.' or c == '\\') total += 2 else total += 1;
+        if (p.len == 0) {
+            total += 1; // '\x01' marker for empty component
+        } else {
+            for (p) |c| {
+                if (c == '.' or c == '\\') total += 2 else total += 1;
+            }
         }
     }
     var out = try alloc.alloc(u8, total);
@@ -1742,7 +1797,7 @@ fn findValueEnd(text: []const u8, pos: usize) usize {
         const close: u8 = if (open == '[') ']' else '}';
         var depth: usize = 1;
         i += 1;
-        while (i < text.len) : (i += 1) {
+        while (i < text.len) {
             const ch = text[i];
             if (ch == open) {
                 depth += 1;
@@ -1751,6 +1806,7 @@ fn findValueEnd(text: []const u8, pos: usize) usize {
                 if (depth == 0) return i + 1;
             } else if (ch == '"') {
                 if (i + 2 < text.len and text[i + 1] == '"' and text[i + 2] == '"') {
+                    // Multiline basic string
                     i += 3;
                     while (i + 2 < text.len) : (i += 1) {
                         if (text[i] == '"' and text[i + 1] == '"' and text[i + 2] == '"') {
@@ -1759,9 +1815,16 @@ fn findValueEnd(text: []const u8, pos: usize) usize {
                             break;
                         }
                     }
-                } else i += 1;
+                } else {
+                    // Single-line basic string: scan past content to closing quote
+                    i += 1;
+                    while (i < text.len and text[i] != '"') : (i += 1) {
+                        if (text[i] == '\\' and i + 1 < text.len) i += 1;
+                    }
+                }
             } else if (ch == '\'') {
                 if (i + 2 < text.len and text[i + 1] == '\'' and text[i + 2] == '\'') {
+                    // Multiline literal string
                     i += 3;
                     while (i + 2 < text.len) : (i += 1) {
                         if (text[i] == '\'' and text[i + 1] == '\'' and text[i + 2] == '\'') {
@@ -1770,8 +1833,13 @@ fn findValueEnd(text: []const u8, pos: usize) usize {
                             break;
                         }
                     }
-                } else i += 1;
+                } else {
+                    // Single-line literal string: scan past content to closing quote
+                    i += 1;
+                    while (i < text.len and text[i] != '\'') : (i += 1) {}
+                }
             }
+            i += 1;
         }
         return text.len;
     }
@@ -1800,14 +1868,14 @@ fn findInlineKeyEnd(text: []const u8, pos: usize) usize {
 
 test "parse simple doc" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "name = \"kb\"\ncount = 1\n");
+    var d = try parse(gpa, "x.toml", "name = \"kb\"\ncount = 1\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 2), d.entries.items.len);
 }
 
 test "parse tables and comments" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "# hi\n[db]\nport = 1 # comment\n");
+    var d = try parse(gpa, "x.toml", "# hi\n[db]\nport = 1 # comment\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 2), d.entries.items.len);
     try std.testing.expectEqualStrings("db", d.entries.items[0].path);
@@ -1815,12 +1883,12 @@ test "parse tables and comments" {
 
 test "parse duplicate key fails" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.DuplicateKey, parse(gpa, "x.toml", "a = 1\na = 2\n"));
+    try std.testing.expectError(error.DuplicateKey, parse(gpa, "x.toml", "a = 1\na = 2\n", null));
 }
 
 test "parse array and inline table" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "arr = [1, 2]\nobj = { name = \"kb\" }\n");
+    var d = try parse(gpa, "x.toml", "arr = [1, 2]\nobj = { name = \"kb\" }\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(doc.ScalarKind, .array), d.entries.items[0].value.kind);
     try std.testing.expectEqual(@as(doc.ScalarKind, .inline_table), d.entries.items[1].value.kind);
@@ -1828,48 +1896,48 @@ test "parse array and inline table" {
 
 test "parse dotted key" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "server.port = 8080\n");
+    var d = try parse(gpa, "x.toml", "server.port = 8080\n", null);
     defer d.deinit(gpa);
     try std.testing.expect(d.entries.items[0].dotted);
 }
 
 test "parse multiline strings" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "desc = \"\"\"hello\nworld\"\"\"\n");
+    var d = try parse(gpa, "x.toml", "desc = \"\"\"hello\nworld\"\"\"\n", null);
     defer d.deinit(gpa);
     try std.testing.expect(std.mem.startsWith(u8, d.entries.items[0].value.raw, "\"\"\""));
 }
 
 test "trivia before entry preserved" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "# hi\n\nname = \"kb\"\n");
+    var d = try parse(gpa, "x.toml", "# hi\n\nname = \"kb\"\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 2), d.entries.items[0].leading.len);
 }
 
 test "literal string ok, invalid escape fails" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "note = 'ok'\n");
+    var d = try parse(gpa, "x.toml", "note = 'ok'\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(doc.ScalarKind, .string), d.entries.items[0].value.kind);
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "bad = \"\\q\"\n"));
+    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "bad = \"\\q\"\n", null));
 }
 
 test "unterminated string fails" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "bad = \"abc\n"));
+    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "bad = \"abc\n", null));
 }
 
 test "parse datetime" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "ts = 1979-05-27T07:32:00Z\n");
+    var d = try parse(gpa, "x.toml", "ts = 1979-05-27T07:32:00Z\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(doc.ScalarKind, .datetime), d.entries.items[0].value.kind);
 }
 
 test "parse local date and time" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "d = 1979-05-27\nt = 07:32:00\n");
+    var d = try parse(gpa, "x.toml", "d = 1979-05-27\nt = 07:32:00\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(doc.ScalarKind, .date_local), d.entries.items[0].value.kind);
     try std.testing.expectEqual(@as(doc.ScalarKind, .time_local), d.entries.items[1].value.kind);
@@ -1877,54 +1945,54 @@ test "parse local date and time" {
 
 test "invalid datetime fails" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "ts = 1979-05-27T07:32\n"));
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "d = 1979-5-27\n"));
+    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "ts = 1979-05-27T07:32\n", null));
+    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "d = 1979-5-27\n", null));
 }
 
 test "parse float" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "pi = 3.14\n");
+    var d = try parse(gpa, "x.toml", "pi = 3.14\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(doc.ScalarKind, .float), d.entries.items[0].value.kind);
 }
 
 test "invalid float fails" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "n = 1.\n"));
+    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "n = 1.\n", null));
 }
 
 test "bare values fail" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "x = foo\n"));
+    try std.testing.expectError(error.InvalidToml, parse(gpa, "x.toml", "x = foo\n", null));
 }
 
 test "duplicate table header fails" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.DuplicateKey, parse(gpa, "x.toml", "[db]\nport = 1\n[db]\nname = \"x\"\n"));
+    try std.testing.expectError(error.DuplicateKey, parse(gpa, "x.toml", "[db]\nport = 1\n[db]\nname = \"x\"\n", null));
 }
 
 test "parse array of tables" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "[[products]]\nname = \"x\"\n[[products]]\nname = \"y\"\n");
+    var d = try parse(gpa, "x.toml", "[[products]]\nname = \"x\"\n[[products]]\nname = \"y\"\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 4), d.entries.items.len);
 }
 
 test "inline table children exist" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "obj = { name = \"kb\", active = true }\n");
+    var d = try parse(gpa, "x.toml", "obj = { name = \"kb\", active = true }\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 2), d.entries.items[0].value.children.len);
 }
 
 test "implicit array table parent conflict" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.DuplicateKey, parse(gpa, "x.toml", "[[albums.songs]]\nname = \"x\"\n[[albums]]\nname = \"y\"\n"));
+    try std.testing.expectError(error.DuplicateKey, parse(gpa, "x.toml", "[[albums.songs]]\nname = \"x\"\n[[albums]]\nname = \"y\"\n", null));
 }
 
 test "CRLF normalization" {
     const gpa = std.testing.allocator;
-    var d = try parse(gpa, "x.toml", "a = 1\r\nb = 2\r\n");
+    var d = try parse(gpa, "x.toml", "a = 1\r\nb = 2\r\n", null);
     defer d.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 2), d.entries.items.len);
 }
