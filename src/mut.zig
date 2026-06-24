@@ -435,27 +435,6 @@ pub fn dumps(doc: *const doc_mod.Document, gpa: Allocator) (Allocator.Error || s
     return doc.render(gpa);
 }
 
-/// Render the document to a TOML string. Equivalent to Python's
-/// `Container.as_string`. Caller frees with `gpa`.
-pub fn asString(doc: *doc_mod.Document, gpa: Allocator) Allocator.Error![]u8 {
-    return doc.render(gpa);
-}
-
-/// Write the document's JSON representation into `out`. Equivalent to
-/// Python's `repr(doc)`.
-pub fn asJson(
-    doc: *doc_mod.Document,
-    gpa: Allocator,
-    out: *std.ArrayList(u8),
-) anyerror!void {
-    var w: std.Io.Writer.Allocating = .init(gpa);
-    defer w.deinit();
-    var s: std.json.Stringify = .{ .writer = &w.writer, .options = .{} };
-    try doc.jsonStringify(&s);
-    const slice = try w.toOwnedSlice();
-    defer gpa.free(slice);
-    try out.appendSlice(gpa, slice);
-}
 
 // --- Tests ------------------------------------------------------------------
 

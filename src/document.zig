@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const kbdiagnostic = @import("kbdiagnostic");
+const parser_mod = @import("parser.zig");
+const mut = @import("mut.zig");
 
 const path_sep: u8 = '\x02';
 
@@ -330,19 +332,6 @@ fn emitObjectBody(
     }
 }
 
-fn jsonEscapeToWriter(writer: anytype, text: []const u8) !void {
-    try writer.writeByte('"');
-    for (text) |c| switch (c) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        else => try writer.writeByte(c),
-    };
-    try writer.writeByte('"');
-}
-
 fn decodeHex(raw: []const u8) ?u21 {
     var value: u21 = 0;
     for (raw) |c| {
@@ -466,47 +455,6 @@ fn classifyRaw(raw: []const u8) ScalarKind {
     return .bare;
 }
 
-fn writeJsonString(writer: anytype, text: []const u8) !void {
-    try writer.writeByte('"');
-    for (text) |c| switch (c) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        else => try writer.writeByte(c),
-    };
-    try writer.writeByte('"');
-}
-
-fn unescapedDotIndex(key: []const u8) ?usize {
-    var i: usize = 0;
-    while (i < key.len) : (i += 1) {
-        if (key[i] == '\\' and i + 1 < key.len) {
-            i += 1;
-            continue;
-        }
-        if (key[i] == '.') return i;
-    }
-    return null;
-}
-
-fn materializeField(allocator: Allocator, raw: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.indexOfScalar(u8, raw, '\\') == null) return try allocator.dupe(u8, raw);
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        if (raw[i] == '\\' and i + 1 < raw.len) {
-            try buf.append(allocator, raw[i + 1]);
-            i += 1;
-        } else {
-            try buf.append(allocator, raw[i]);
-        }
-    }
-    return try buf.toOwnedSlice(allocator);
-}
-
 fn writeScalarJson(jws: anytype, value: Scalar) !void {
     switch (value.kind) {
         .array => {
@@ -524,9 +472,9 @@ fn writeScalarJson(jws: anytype, value: Scalar) !void {
             }
             for (value.children) |child| {
                 const key = child.key orelse return error.WriteFailed;
-                const dot = unescapedDotIndex(key);
+                const dot = indexOfUnescapedDot(key, 0);
                 const field_raw = if (dot) |d| key[0..d] else key;
-                const field = materializeField(std.heap.page_allocator, field_raw) catch return error.WriteFailed;
+                const field = materializeSegment(std.heap.page_allocator, field_raw) catch return error.WriteFailed;
                 const gop = emitted.getOrPut(field) catch return error.WriteFailed;
                 if (gop.found_existing) {
                     std.heap.page_allocator.free(field);
@@ -601,3 +549,78 @@ fn writeScalarJson(jws: anytype, value: Scalar) !void {
         },
     }
 }
+// --- Shared helpers for mut_* views -----------------------------------------
+
+/// Convert an `Item` to a `Scalar`. Leaf variants are extracted directly;
+/// compound variants (`array`, `inlineTable`) build a fresh `Scalar` that
+/// borrows the view's children. Trivia/body-level variants produce a bare
+/// empty scalar. Caller owns nothing — the scalar borrows from the Item.
+pub fn itemToScalar(item: mut.Item) Allocator.Error!Scalar {
+    return switch (item) {
+        .integer => |s| s,
+        .float => |s| s,
+        .bool => |s| s,
+        .string => |s| s,
+        .datetime => |s| s,
+        .datetimeLocal => |s| s,
+        .dateLocal => |s| s,
+        .timeLocal => |s| s,
+        .bare => |s| s,
+        .array => |a| .{
+            .kind = .array,
+            .raw = a.scalar.raw,
+            .span = a.scalar.span,
+            .children = a.scalar.children,
+        },
+        .inlineTable => |t| .{
+            .kind = .inline_table,
+            .raw = t.ownerScalar().raw,
+            .span = t.ownerScalar().span,
+            .children = t.ownerScalar().children,
+            .key = null,
+        },
+        .comment, .whitespace, .nullMarker, .tableHeader, .aot => .{
+            .kind = .bare,
+            .raw = "",
+            .span = .{ .offset = 0, .length = 0 },
+        },
+    };
+}
+
+/// Convert a `Scalar` back to an `Item`. Leaf kinds map directly; arrays
+/// and inline tables wrap in their respective view types.
+pub fn scalarToItem(s: Scalar) mut.Item {
+    return switch (s.kind) {
+        .integer => .{ .integer = s },
+        .float => .{ .float = s },
+        .boolean => .{ .bool = s },
+        .string => .{ .string = s },
+        .datetime => .{ .datetime = s },
+        .datetime_local => .{ .datetimeLocal = s },
+        .date_local => .{ .dateLocal = s },
+        .time_local => .{ .timeLocal = s },
+        .array => .{ .array = .{ .scalar = @constCast(&s) } },
+        .inline_table => .{ .inlineTable = .{ .scalar = @constCast(&s) } },
+        else => .{ .bare = s },
+    };
+}
+
+/// Regenerate `scalar.raw` from `scalar.children` for container kinds.
+/// No-op when the regenerated form equals the existing `raw` slice
+/// (freeing both). Leaf scalars return `raw` unchanged.
+fn regenRawInPlace(gpa: Allocator, scalar: *Scalar) void {
+    const new_raw = Document.regenerateScalarRaw(gpa, scalar) catch return;
+    if (new_raw.ptr != scalar.raw.ptr) {
+        gpa.free(scalar.raw);
+        scalar.raw = new_raw;
+    } else {
+        gpa.free(new_raw);
+    }
+}
+
+// --- Test helpers -----------------------------------------------------------
+
+pub fn makeDoc(gpa: Allocator, input: []const u8) !Document {
+    return try parser_mod.parse(gpa, "x.toml", input, null);
+}
+

@@ -36,7 +36,7 @@ pub const Array = struct {
         pub fn next(self: *Iterator) ?mut.Item {
             if (self.index >= self.array.scalar.children.len) return null;
             defer self.index += 1;
-            return scalarToItem(self.array.scalar.children[self.index]);
+            return doc_mod.scalarToItem(self.array.scalar.children[self.index]);
         }
     };
 
@@ -85,10 +85,10 @@ pub const Array = struct {
             return Error.OutOfMemory;
         };
         std.mem.copyForwards(doc_mod.Scalar, new_ptr[0..old.len], old);
-        new_ptr[old.len] = itemToScalar(item, gpa);
+        new_ptr[old.len] = doc_mod.itemToScalar(item) catch return Error.OutOfMemory;
         if (old.len > 0) gpa.free(old);
         self.scalar.children = new_ptr;
-        regenRawInPlace(gpa, self.scalar);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
     }
 
     pub fn extend(
@@ -136,11 +136,11 @@ pub const Array = struct {
             return Error.OutOfMemory;
         };
         std.mem.copyForwards(doc_mod.Scalar, new_ptr[0..index], old[0..index]);
-        new_ptr[index] = itemToScalar(item, gpa);
+        new_ptr[index] = doc_mod.itemToScalar(item) catch return Error.OutOfMemory;
         std.mem.copyForwards(doc_mod.Scalar, new_ptr[index + 1 ..], old[index..]);
         if (old.len > 0) gpa.free(old);
         self.scalar.children = new_ptr;
-        regenRawInPlace(gpa, self.scalar);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
     }
 
     pub fn pop(
@@ -163,8 +163,8 @@ pub const Array = struct {
             gpa.free(old);
             self.scalar.children = new_ptr;
         }
-        regenRawInPlace(gpa, self.scalar);
-        return scalarToItem(last);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
+        return doc_mod.scalarToItem(last);
     }
 
     pub fn remove(
@@ -198,8 +198,8 @@ pub const Array = struct {
             gpa.free(old);
             self.scalar.children = new_ptr;
         }
-        regenRawInPlace(gpa, self.scalar);
-        return scalarToItem(removed);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
+        return doc_mod.scalarToItem(removed);
     }
 
     /// Remove all items. Frees the children slice.
@@ -211,81 +211,10 @@ pub const Array = struct {
             }
             gpa.free(self.scalar.children);
             self.scalar.children = &.{};
-            regenRawInPlace(gpa, self.scalar);
+            doc_mod.regenRawInPlace(gpa, self.scalar);
         }
     }
 };
-
-// --- Item <-> Scalar conversion ---------------------------------------------
-
-fn itemToScalar(it: mut.Item, gpa: Allocator) doc_mod.Scalar {
-    return switch (it) {
-        .integer => |s| s,
-        .float => |s| s,
-        .bool => |s| s,
-        .string => |s| s,
-        .datetime => |s| s,
-        .datetimeLocal => |s| s,
-        .dateLocal => |s| s,
-        .timeLocal => |s| s,
-        .bare => |s| s,
-        .array => |a| .{
-            .kind = .array,
-            .raw = regenArrayRaw(gpa, a.scalar.children),
-            .span = a.scalar.span,
-            .children = a.scalar.children,
-        },
-        .inlineTable => |t| .{
-            .kind = .inline_table,
-            .raw = @constCast("{}"),
-            .span = t.ownerScalar().span,
-            .children = t.ownerScalar().children,
-        },
-        .comment => .{ .kind = .bare, .raw = "", .span = .{ .offset = 0, .length = 0 } },
-        .whitespace => .{ .kind = .bare, .raw = "", .span = .{ .offset = 0, .length = 0 } },
-        .nullMarker => .{ .kind = .bare, .raw = "null", .span = .{ .offset = 0, .length = 4 } },
-        .tableHeader => .{ .kind = .bare, .raw = "", .span = .{ .offset = 0, .length = 0 } },
-        .aot => .{ .kind = .bare, .raw = "", .span = .{ .offset = 0, .length = 0 } },
-    };
-}
-
-fn scalarToItem(s: doc_mod.Scalar) mut.Item {
-    return switch (s.kind) {
-        .integer => .{ .integer = s },
-        .float => .{ .float = s },
-        .boolean => .{ .bool = s },
-        .string => .{ .string = s },
-        .datetime => .{ .datetime = s },
-        .datetime_local => .{ .datetimeLocal = s },
-        .date_local => .{ .dateLocal = s },
-        .time_local => .{ .timeLocal = s },
-        else => .{ .bare = s },
-    };
-}
-
-fn regenArrayRaw(gpa: Allocator, children: []const doc_mod.Scalar) []const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(gpa);
-    buf.append(gpa, '[') catch return "[]";
-    for (children, 0..) |c, i| {
-        if (i > 0) buf.append(gpa, ',') catch return "[]";
-        buf.appendSlice(gpa, c.raw) catch return "[]";
-    }
-    buf.append(gpa, ']') catch return "[]";
-    return buf.toOwnedSlice(gpa) catch return "[]";
-}
-
-/// Regenerate `scalar.raw` and update it in place. No-op when the
-/// regenerated form equals the existing `raw` slice (freeing both).
-fn regenRawInPlace(gpa: Allocator, scalar: *doc_mod.Scalar) void {
-    const new_raw = doc_mod.Document.regenerateScalarRaw(gpa, scalar) catch return;
-    if (new_raw.ptr != scalar.raw.ptr) {
-        gpa.free(scalar.raw);
-        scalar.raw = new_raw;
-    } else {
-        gpa.free(new_raw);
-    }
-}
 
 fn oomDiagnostic(span: kbdiagnostic.SourceSpan) kbdiagnostic.Diagnostic {
     var d: mut.MutationDiagnostic = .{
@@ -300,21 +229,15 @@ fn oomDiagnostic(span: kbdiagnostic.SourceSpan) kbdiagnostic.Diagnostic {
     return d.diagnostic();
 }
 
-// --- Tests ------------------------------------------------------------------
-
-const parser_mod = @import("parser.zig");
-
-fn makeDocWithArray(gpa: Allocator, input: []const u8) !doc_mod.Document {
-    return try parser_mod.parse(gpa, "x.toml", input, null);
-}
 
 fn findArrayScalar(doc: *doc_mod.Document) *doc_mod.Scalar {
     return &doc.entries.items[0].value;
 }
+// --- Tests ------------------------------------------------------------------
 
 test "array append grows" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = []\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = []\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
     try std.testing.expectEqual(@as(usize, 0), arr.count());
@@ -325,7 +248,7 @@ test "array append grows" {
 
 test "array append regenerates raw" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = []\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = []\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
     try arr.append(gpa, try mut.integer(gpa, @as(i64, 80)), null);
@@ -336,7 +259,7 @@ test "array append regenerates raw" {
 
 test "array append rejects comment with diagnostic" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = []\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = []\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
 
@@ -354,7 +277,7 @@ test "array append rejects comment with diagnostic" {
 
 test "array insert and remove" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = [80, 443]\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = [80, 443]\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
 
@@ -375,7 +298,7 @@ test "array insert and remove" {
 
 test "array clear empties" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = [80, 443]\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = [80, 443]\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
     try std.testing.expectEqual(@as(usize, 2), arr.count());
@@ -385,7 +308,7 @@ test "array clear empties" {
 
 test "array iterator yields items" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = [80, 443]\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = [80, 443]\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
 
@@ -399,7 +322,7 @@ test "array iterator yields items" {
 
 test "array extend appends all" {
     const gpa = std.testing.allocator;
-    var doc = try makeDocWithArray(gpa, "ports = [80]\n");
+    var doc = try doc_mod.makeDoc(gpa, "ports = [80]\n");
     defer doc.deinit(gpa);
     var arr = Array{ .scalar = findArrayScalar(&doc) };
 

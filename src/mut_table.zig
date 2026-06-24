@@ -307,27 +307,16 @@ pub const Table = struct {
 };
 
 fn itemToScalar(_: Allocator, item: mut.Item, diag: ?*mut.Diagnostic) ?doc_mod.Scalar {
-    return switch (item) {
-        .integer => |s| s,
-        .float => |s| s,
-        .bool => |s| s,
-        .string => |s| s,
-        .datetime => |s| s,
-        .datetimeLocal => |s| s,
-        .dateLocal => |s| s,
-        .timeLocal => |s| s,
-        .bare => |s| s,
-        else => {
-            if (diag) |d| {
-                d.* = mut.keyTypeError(
-                    null,
-                    .{ .offset = 0, .length = 0 },
-                    "scalar",
-                    @tagName(item),
-                ).diagnostic();
-            }
-            return null;
-        },
+    return doc_mod.itemToScalar(item) catch {
+        if (diag) |d| {
+            d.* = mut.keyTypeError(
+                null,
+                .{ .offset = 0, .length = 0 },
+                "scalar",
+                @tagName(item),
+            ).diagnostic();
+        }
+        return null;
     };
 }
 

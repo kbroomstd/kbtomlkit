@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const kbtomlkit = @import("kbtomlkit");
+// kbtomlkit module available here for future CLI use.
 
 pub fn main(init: std.process.Init) !void {
     // Prints to stderr, unbuffered, ignoring potential errors.
@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try kbtomlkit.printAnotherMessage(stdout_writer);
+    _ = stdout_writer; // reserved for future CLI output
 
     try stdout_writer.flush(); // Don't forget to flush!
 }

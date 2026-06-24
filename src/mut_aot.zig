@@ -179,15 +179,10 @@ fn failOom(diag: ?*mut.Diagnostic) Error {
     return Error.OutOfMemory;
 }
 
-const parser_mod = @import("parser.zig");
-
-fn makeDoc(gpa: Allocator, input: []const u8) !doc_mod.Document {
-    return try parser_mod.parse(gpa, "x.toml", input, null);
-}
 
 test "aot append pop" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "");
+    var doc = try doc_mod.makeDoc(gpa, "");
     defer doc.deinit(gpa);
     var aot = try Aot.at(&doc, gpa, "servers");
     defer aot.deinit(gpa);
@@ -203,7 +198,7 @@ test "aot append pop" {
 
 test "aot append multiple elements" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "");
+    var doc = try doc_mod.makeDoc(gpa, "");
     defer doc.deinit(gpa);
     var aot = try Aot.at(&doc, gpa, "servers");
     defer aot.deinit(gpa);
@@ -224,7 +219,7 @@ test "aot append multiple elements" {
 
 test "aot out of bounds remove" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "");
+    var doc = try doc_mod.makeDoc(gpa, "");
     defer doc.deinit(gpa);
     var aot = try Aot.at(&doc, gpa, "servers");
     defer aot.deinit(gpa);
@@ -235,7 +230,7 @@ test "aot out of bounds remove" {
 
 test "aot refresh counts existing elements" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "[[servers]]\nhost = \"127.0.0.1\"\n[[servers]]\nhost = \"10.0.0.1\"\n");
+    var doc = try doc_mod.makeDoc(gpa, "[[servers]]\nhost = \"127.0.0.1\"\n[[servers]]\nhost = \"10.0.0.1\"\n");
     defer doc.deinit(gpa);
     var aot = try Aot.at(&doc, gpa, "servers");
     defer aot.deinit(gpa);

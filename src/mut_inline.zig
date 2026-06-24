@@ -31,7 +31,7 @@ pub const InlineTable = struct {
             defer self.index += 1;
             return .{
                 .key = c.key orelse "",
-                .item = scalarToItem(c),
+                .item = doc_mod.scalarToItem(c),
             };
         }
     };
@@ -46,7 +46,7 @@ pub const InlineTable = struct {
 
     pub fn get(self: *const Self, key: []const u8) ?mut.Item {
         const idx = self.findIndex(key) orelse return null;
-        return scalarToItem(self.scalar.children[idx]);
+        return doc_mod.scalarToItem(self.scalar.children[idx]);
     }
 
     pub fn iterator(self: *const Self) Iterator {
@@ -82,7 +82,7 @@ pub const InlineTable = struct {
         }
         const new_key = gpa.dupe(u8, key) catch return Error.OutOfMemory;
         errdefer gpa.free(new_key);
-        var new_scalar = itemToScalar(item);
+        var new_scalar = doc_mod.itemToScalar(item) catch return Error.OutOfMemory;
         new_scalar.key = new_key;
         if (self.findIndex(key)) |idx| {
             const old = self.scalar.children;
@@ -90,11 +90,11 @@ pub const InlineTable = struct {
             gpa.free(old[idx].raw);
             if (old[idx].children.len > 0) gpa.free(old[idx].children);
             self.scalar.children[idx] = new_scalar;
-            regenRawInPlace(gpa, self.scalar);
+            doc_mod.regenRawInPlace(gpa, self.scalar);
             return;
         }
         try self.appendChild(gpa, new_scalar);
-        regenRawInPlace(gpa, self.scalar);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
     }
 
     pub fn add(
@@ -123,10 +123,10 @@ pub const InlineTable = struct {
         }
         const new_key = gpa.dupe(u8, key) catch return Error.OutOfMemory;
         errdefer gpa.free(new_key);
-        var new_scalar = itemToScalar(item);
+        var new_scalar = doc_mod.itemToScalar(item) catch return Error.OutOfMemory;
         new_scalar.key = new_key;
         try self.appendChild(gpa, new_scalar);
-        regenRawInPlace(gpa, self.scalar);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
     }
 
     pub fn remove(
@@ -150,7 +150,7 @@ pub const InlineTable = struct {
         std.mem.copyForwards(doc_mod.Scalar, new_ptr[idx..], old[idx + 1 ..]);
         if (old.len > 0) gpa.free(old);
         self.scalar.children = new_ptr;
-        regenRawInPlace(gpa, self.scalar);
+        doc_mod.regenRawInPlace(gpa, self.scalar);
     }
 
     fn appendChild(self: *Self, gpa: Allocator, new_scalar: doc_mod.Scalar) Allocator.Error!void {
@@ -174,73 +174,9 @@ pub const InlineTable = struct {
     }
 };
 
-fn itemToScalar(item: mut.Item) doc_mod.Scalar {
-    return switch (item) {
-        .integer => |s| s,
-        .float => |s| s,
-        .bool => |s| s,
-        .string => |s| s,
-        .datetime => |s| s,
-        .datetimeLocal => |s| s,
-        .dateLocal => |s| s,
-        .timeLocal => |s| s,
-        .bare => |s| s,
-        .array => |a| .{
-            .kind = .array,
-            .raw = a.scalar.raw,
-            .span = a.scalar.span,
-            .children = a.scalar.children,
-        },
-        .inlineTable => |t| .{
-            .kind = .inline_table,
-            .raw = t.ownerScalar().raw,
-            .span = t.ownerScalar().span,
-            .children = t.ownerScalar().children,
-            .key = null,
-        },
-        .comment, .whitespace, .nullMarker, .tableHeader, .aot => .{
-            .kind = .bare,
-            .raw = "",
-            .span = .{ .offset = 0, .length = 0 },
-        },
-    };
-}
-
-fn scalarToItem(s: doc_mod.Scalar) mut.Item {
-    return switch (s.kind) {
-        .integer => .{ .integer = s },
-        .float => .{ .float = s },
-        .boolean => .{ .bool = s },
-        .string => .{ .string = s },
-        .datetime => .{ .datetime = s },
-        .datetime_local => .{ .datetimeLocal = s },
-        .date_local => .{ .dateLocal = s },
-        .time_local => .{ .timeLocal = s },
-        .array => .{ .array = .{ .scalar = @constCast(&s) } },
-        .inline_table => .{ .inlineTable = .{ .scalar = @constCast(&s) } },
-        else => .{ .bare = s },
-    };
-}
-
-fn regenRawInPlace(gpa: Allocator, scalar: *doc_mod.Scalar) void {
-    const new_raw = doc_mod.Document.regenerateScalarRaw(gpa, scalar) catch return;
-    if (new_raw.ptr != scalar.raw.ptr) {
-        gpa.free(scalar.raw);
-        scalar.raw = new_raw;
-    } else {
-        gpa.free(new_raw);
-    }
-}
-
-const parser_mod = @import("parser.zig");
-
-fn makeDoc(gpa: Allocator, input: []const u8) !doc_mod.Document {
-    return try parser_mod.parse(gpa, "x.toml", input, null);
-}
-
 test "inline set remove" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "point = {x = 1}\n");
+    var doc = try doc_mod.makeDoc(gpa, "point = {x = 1}\n");
     defer doc.deinit(gpa);
     var it = InlineTable{ .scalar = &doc.entries.items[0].value };
 
@@ -255,7 +191,7 @@ test "inline set remove" {
 
 test "inline set regenerates raw" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "point = {x = 1}\n");
+    var doc = try doc_mod.makeDoc(gpa, "point = {x = 1}\n");
     defer doc.deinit(gpa);
     var it = InlineTable{ .scalar = &doc.entries.items[0].value };
 
@@ -266,7 +202,7 @@ test "inline set regenerates raw" {
 
 test "inline add rejects duplicate with diagnostic" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "point = {x = 1, y = 2}\n");
+    var doc = try doc_mod.makeDoc(gpa, "point = {x = 1, y = 2}\n");
     defer doc.deinit(gpa);
     var it = InlineTable{ .scalar = &doc.entries.items[0].value };
 
@@ -283,7 +219,7 @@ test "inline add rejects duplicate with diagnostic" {
 
 test "inline iterator yields entries" {
     const gpa = std.testing.allocator;
-    var doc = try makeDoc(gpa, "point = {x = 1, y = 2}\n");
+    var doc = try doc_mod.makeDoc(gpa, "point = {x = 1, y = 2}\n");
     defer doc.deinit(gpa);
     var it = InlineTable{ .scalar = &doc.entries.items[0].value };
 
